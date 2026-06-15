@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .clean import normalize_name, text
+from .clean import normalize_report_name, text
 from .security import secure_mkdir
 
 SCHEMA = """
@@ -29,8 +29,17 @@ CREATE TABLE IF NOT EXISTS reports (
   times_run REAL,
   exec_count INTEGER, last_exec_date TEXT, distinct_requesters INTEGER,
   appears_in_exec INTEGER, eff_last_run TEXT,
-  is_hard_rule INTEGER, hard_rule_id TEXT,
+  comprehensive_last_run_date TEXT, effective_last_run_date TEXT,
+  comprehensive_exec_count REAL, runs_exec_count INTEGER,
+  is_hard_rule INTEGER, hard_rule_id TEXT, hard_rule_triggered INTEGER,
+  hard_rule_name TEXT, hard_rule_reason TEXT,
   usage_risk INTEGER, age_risk INTEGER, usage_context_risk INTEGER,
+  cleanup_risk_points INTEGER, cleanup_percentage INTEGER,
+  business_protection_credit INTEGER, overall_score INTEGER,
+  recurrence_classification TEXT, recurrence_cadence TEXT, recurrence_match_percentage REAL,
+  potential_duplicate INTEGER, potential_duplicate_of TEXT,
+  duplicate_similarity REAL, duplicate_relationship TEXT,
+  field_jaccard_similarity REAL, smaller_report_containment REAL,
   total_risk_score INTEGER, recommendation TEXT,
   ownership_flags TEXT, data_quality_flags TEXT, all_flags TEXT,
   dup_group_id TEXT, is_suggested_keeper INTEGER, suggested_keeper_report_name TEXT,
@@ -143,8 +152,16 @@ REPORT_COLS = [
     "description", "report_fields", "worklet", "shared", "chart_type", "created_date",
     "last_updated", "last_run_date", "last_run_by", "times_run", "exec_count",
     "last_exec_date", "distinct_requesters", "appears_in_exec", "eff_last_run",
-    "is_hard_rule", "hard_rule_id",
-    "usage_risk", "age_risk", "usage_context_risk", "total_risk_score", "recommendation",
+    "comprehensive_last_run_date", "effective_last_run_date",
+    "comprehensive_exec_count", "runs_exec_count",
+    "is_hard_rule", "hard_rule_id", "hard_rule_triggered", "hard_rule_name", "hard_rule_reason",
+    "usage_risk", "age_risk", "usage_context_risk",
+    "cleanup_risk_points", "cleanup_percentage", "business_protection_credit", "overall_score",
+    "recurrence_classification", "recurrence_cadence", "recurrence_match_percentage",
+    "potential_duplicate", "potential_duplicate_of",
+    "duplicate_similarity", "duplicate_relationship",
+    "field_jaccard_similarity", "smaller_report_containment",
+    "total_risk_score", "recommendation",
     "ownership_flags", "data_quality_flags", "all_flags",
     "dup_group_id", "is_suggested_keeper", "suggested_keeper_report_name",
     "candidate_similarity_score", "report_name_similarity_percent",
@@ -194,12 +211,10 @@ def write_field_data(conn, run_id: int, rollup_result: dict, records: list[dict]
     if not rollup_result:
         return
 
-    name_noise = (cfg.clean or {}).get("name_noise", [])
-
-    # Build report_uid lookup by normalized name key (mirrors attach_report_fields).
+    # Build report_uid lookup by EXACT normalized name key (mirrors attach_report_fields).
     uid_by_key: dict[str, int] = {}
     for r in records:
-        rk = normalize_name(text(r.get("report_name", "")), name_noise)
+        rk = normalize_report_name(r.get("report_name", ""))
         if rk:
             uid_by_key[rk] = r["report_uid"]
 

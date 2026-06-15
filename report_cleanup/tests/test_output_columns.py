@@ -42,3 +42,34 @@ def test_output_has_all_new_columns():
 def test_flags_joined_with_semicolons():
     row = report_row(_record())
     assert row["all_flags"] == "Missing Owner; Missing Description"
+
+
+NEW_HEADLINE_COLS = [
+    "Overall Score", "Recommendation", "Hard Rule Triggered", "Hard Rule Name",
+    "Effective Last Run Date", "Comprehensive Exec Count", "Runs Exec Count (6mo window)",
+    "Cleanup Risk Points", "Cleanup %", "Business Protection Credit",
+    "Cleanup Reasons", "Protection Reasons",
+    "Recurrence", "Recurrence Cadence", "Distinct Requesters",
+    "Potential Duplicate", "Potential Duplicate Of", "Duplicate Similarity",
+    "Duplicate Relationship", "Field Jaccard %", "Smaller Report Containment %",
+]
+
+
+def test_output_has_new_headline_columns():
+    row = report_row(_record())
+    for col in NEW_HEADLINE_COLS:
+        assert col in row, f"missing new output column: {col}"
+
+
+def test_overall_score_and_recurrence_render():
+    rec = _record()
+    rec.update(overall_score=63, cleanup_risk_points=45, cleanup_percentage=75,
+               business_protection_credit=12, recurrence_classification="Strong",
+               recurrence_cadence="monthly", potential_duplicate=True,
+               potential_duplicate_of="Other", duplicate_similarity=91.0,
+               duplicate_relationship="Nearly Identical")
+    row = report_row(rec)
+    assert row["Overall Score"] == 63
+    assert row["Recurrence"] == "Strong"
+    assert row["Potential Duplicate"] == "Yes"
+    assert row["Potential Duplicate Of"] == "Other"

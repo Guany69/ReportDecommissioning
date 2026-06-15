@@ -7,6 +7,7 @@ ever auto-deleted — every column is a recommendation.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -22,15 +23,20 @@ from .security import (
     sensitive_mode_enabled,
 )
 
-# Recommendation band -> header fill.
+# Per-recommendation review tabs (the Overall-Score tiers below 100; the 100 /
+# hard-rule cases get their own "Hard Rule Matches" tab).
+BANDS = [
+    "High-Priority Decommissioning Review",
+    "Decommissioning Review",
+    "Owner Review / Monitor",
+    "Keep",
+]
 BAND_FILL = {
     "Keep": "DCFCE7",
-    "Low Priority Review": "DBEAFE",
-    "Consolidation Candidate": "FEF3C7",
-    "Decommission Review": "FEE2E2",
+    "Owner Review / Monitor": "DBEAFE",
+    "Decommissioning Review": "FEF3C7",
+    "High-Priority Decommissioning Review": "FEE2E2",
 }
-
-BANDS = ["Keep", "Low Priority Review", "Consolidation Candidate", "Decommission Review"]
 
 
 def _fmt_date(v):
@@ -63,14 +69,17 @@ def _list_str(v):
     return text(v)
 
 
-def report_row(r: dict) -> dict:
-    """One row for the All Reports tab."""
-    reasons = r.get("all_reasons", [])
-    trail = "; ".join(
+def _reason_str(reasons) -> str:
+    return "; ".join(
         f"{'+' if (rs.points or 0) >= 0 else ''}{rs.points} {rs.label}" if rs.points is not None
         else rs.label
-        for rs in reasons
+        for rs in (reasons or [])
     )
+
+
+def report_row(r: dict) -> dict:
+    """One row for the All Reports tab."""
+    trail = _reason_str(r.get("all_reasons", []))
     hard = r.get("is_hard_rule")
     return {
         "Report Name": text(r.get("report_name")),
@@ -89,13 +98,37 @@ def report_row(r: dict) -> dict:
         "Created Date": _fmt_date(r.get("created_date")),
         "Last Updated Date": _fmt_date(r.get("last_updated")),
         "Last Run Date": _fmt_date(r.get("last_run_date")),
+        "Effective Last Run Date": _fmt_date(r.get("effective_last_run_date")),
+        "Comprehensive Exec Count": _int(r.get("comprehensive_exec_count")),
+        "Runs Exec Count (6mo window)": _int(r.get("runs_exec_count")),
         "Number of Times Run": _int(r.get("times_run")),
-        # ---- Risk scoring ----
+        # ---- Overall Decommissioning Score (headline) ----
+        "Overall Score": _int(r.get("overall_score")),
+        "Recommendation": text(r.get("recommendation")),
+        "Hard Rule Triggered": _bool(r.get("hard_rule_triggered")),
+        "Hard Rule Name": text(r.get("hard_rule_name")),
+        "Cleanup Risk Points": _int(r.get("cleanup_risk_points")),
+        "Cleanup %": _int(r.get("cleanup_percentage")),
+        "Business Protection Credit": _int(r.get("business_protection_credit")),
+        "Cleanup Reasons": _reason_str(r.get("cleanup_reasons")),
+        "Protection Reasons": _reason_str(r.get("protection_reasons")),
+        # ---- Recurrence ----
+        "Recurrence": text(r.get("recurrence_classification")),
+        "Recurrence Cadence": text(r.get("recurrence_cadence")),
+        "Distinct Requesters": _int(r.get("distinct_requesters")),
+        # ---- Weighted duplicate evidence ----
+        "Potential Duplicate": _bool(r.get("potential_duplicate")),
+        "Potential Duplicate Of": text(r.get("potential_duplicate_of")),
+        "Duplicate Similarity": _pct(r.get("duplicate_similarity")),
+        "Duplicate Relationship": text(r.get("duplicate_relationship")),
+        "Field Jaccard %": _pct(r.get("field_jaccard_similarity")),
+        "Smaller Report Containment %": _pct(r.get("smaller_report_containment")),
+        # ---- Legacy risk columns (cleanup sub-scores; kept for continuity) ----
         "usage_risk": "" if hard else r.get("usage_risk", ""),
         "age_risk": "" if hard else r.get("age_risk", ""),
         "usage_context_risk": "" if hard else r.get("usage_context_risk", ""),
         "total_risk_score": "" if hard else r.get("total_risk_score", ""),
-        "recommendation": (r.get("hard_rule_id") or "Hard Rule") if hard else text(r.get("recommendation")),
+        "recommendation": text(r.get("recommendation")),
         # ---- Flags (no score weight) ----
         "ownership_flags": _flags(r.get("ownership_flags")),
         "data_quality_flags": _flags(r.get("data_quality_flags")),
@@ -274,8 +307,16 @@ def _prep(df: pd.DataFrame) -> pd.DataFrame:
     return sanitize_df_for_excel(df)
 
 
+_INVALID_SHEET_CHARS = re.compile(r"[\\/*?:\[\]]")
+
+
+def _safe_sheet_name(name: str) -> str:
+    # Excel forbids \ / * ? : [ ] in sheet titles and caps length at 31 chars.
+    return _INVALID_SHEET_CHARS.sub("-", str(name))[:31].strip() or "Sheet"
+
+
 def _sheet(xw, name, rows):
-    name = name[:31]  # Excel sheet names cap at 31 chars.
+    name = _safe_sheet_name(name)
     df = pd.DataFrame(rows) if rows else pd.DataFrame([{"Info": "No rows in this category"}])
     _prep(df).to_excel(xw, sheet_name=name, index=False)
 

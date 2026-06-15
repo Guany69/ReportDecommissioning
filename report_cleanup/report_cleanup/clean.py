@@ -88,6 +88,42 @@ def normalize_text(v, null_tokens) -> object:
     return s if s != "" else np.nan
 
 
+def normalize_report_name(value: object) -> str:
+    """Exact report-name key for joining Comprehensive <-> Runs and Where_Used.
+
+    Case-insensitive, whitespace-trimmed, internal whitespace collapsed — and
+    NOTHING else. Unlike ``normalize_name`` this is *not* de-noised: it never
+    strips version/junk tokens, so two genuinely different reports can never
+    collapse onto the same key. The two files are guaranteed to carry identical
+    report names, so an exact (non-fuzzy) match is correct here.
+    """
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return " ".join(str(value).strip().casefold().split())
+
+
+def normalize_multiline(v, null_tokens) -> object:
+    """Like normalize_text but PRESERVES line breaks.
+
+    Used for columns such as Where_Used whose newlines are meaningful record
+    separators. Collapses runs of spaces/tabs within each line and trims each
+    line, but keeps the newline structure so downstream splitting still works.
+    """
+    if is_null(v):
+        return np.nan
+    s = str(v).replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", ln).strip() for ln in s.split("\n")]
+    s = "\n".join(lines).strip()
+    if s.lower() in {t.lower() for t in null_tokens}:
+        return np.nan
+    return s if s != "" else np.nan
+
+
 def normalize_name(v, name_noise) -> str:
     """Lowercase, strip punctuation, drop noise + version tokens and bare ints.
 
@@ -113,6 +149,8 @@ def clean_table(df: pd.DataFrame, field_types: dict[str, str], cfg_clean) -> pd.
             out[col] = out[col].map(to_number)
         elif ftype == "bool":
             out[col] = out[col].map(lambda v: to_bool(v, cfg_clean))
+        elif ftype == "multiline":
+            out[col] = out[col].map(lambda v: normalize_multiline(v, null_tokens))
         else:
             out[col] = out[col].map(lambda v: normalize_text(v, null_tokens))
     return out

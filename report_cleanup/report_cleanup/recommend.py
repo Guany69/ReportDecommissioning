@@ -13,13 +13,22 @@ import pandas as pd
 from .clean import is_true
 from .dedup import (calculate_name_similarity, candidate_similarity_score,
                     classify_field_match)
-from .hard_rules import HARD_RULE_RECOMMENDATION
+from .protection import _distinct_area_count
 from .report_fields import (calculate_field_containment,
                             calculate_field_similarity)
 from .soft_scoring import Reason
 
-_META_FIELDS = ("description", "category", "report_tag", "data_source",
-                "report_prompts", "areas_used", "landing_page", "owner")
+def recommend_label(overall_score, cfg) -> str:
+    """Map an Overall Decommissioning Score (0..100) to its recommendation label
+    using the configurable, high-to-low thresholds in cfg.recommendation."""
+    if overall_score is None:
+        return "Keep"
+    thresholds = sorted(cfg.recommendation["thresholds"], key=lambda t: t["min"], reverse=True)
+    for t in thresholds:
+        if overall_score >= t["min"]:
+            return t["label"]
+    return thresholds[-1]["label"]
+
 
 _STRONG = {"Nearly Identical Duplicate", "One Report Contained In Another"}
 _CONSOLIDATE = {"Strong Duplicate Candidate", "Strong Consolidation Candidate"}
@@ -54,19 +63,6 @@ def _effective_field_count(m: dict) -> int:
     return 0
 
 
-def _metadata_completeness(m: dict) -> int:
-    return sum(1 for k in _META_FIELDS
-               if m.get(k) is not None and not pd.isna(m.get(k)) and str(m.get(k)).strip())
-
-
-def _active_owner(m: dict) -> bool:
-    """Owner present and not flagged inactive."""
-    owner = m.get("owner")
-    if owner is None or pd.isna(owner) or not str(owner).strip():
-        return False
-    return "Inactive Owner" not in (m.get("ownership_flags") or [])
-
-
 def _shared_yes(m: dict) -> bool:
     v = m.get("shared")
     if v is None or (not isinstance(v, str) and pd.isna(v)):
@@ -74,40 +70,51 @@ def _shared_yes(m: dict) -> bool:
     return bool(v) if not isinstance(v, str) else is_true(v)
 
 
-def _has(m: dict, key: str) -> bool:
-    v = m.get(key)
-    return v is not None and not pd.isna(v) and bool(str(v).strip())
+_RECURRENCE_RANK = {"Strong": 3, "Moderate": 2, "No Recurring Pattern": 1, "Insufficient History": 0}
+
+
+def _overall(m: dict) -> float:
+    """Overall Decommissioning Score, falling back to cleanup risk for callers that
+    only set the legacy field."""
+    v = _num(m.get("overall_score"))
+    if v is None:
+        v = _num(m.get("total_risk_score"))
+    return v if v is not None else 1e9
+
+
+def _recurrence_rank(m: dict) -> int:
+    return _RECURRENCE_RANK.get(str((m.get("recurrence") or {}).get("classification", "")), 0)
 
 
 def choose_suggested_keeper(group_members: list[dict]) -> tuple[int, str]:
-    """Return (keeper_uid, consolidation_reason).
+    """Return (keeper_uid, keeper_reason).
 
-    Priority (highest wins): field coverage, lowest risk, most recent run,
-    highest run count, active owner, metadata completeness, Shared=Yes, has
-    areas-where-used, has landing page; ties broken by lower report_uid.
+    Priority (highest wins), per requirement: lower Overall Score, more recent
+    effective last run, stronger recurrence, more distinct requesters, greater
+    field coverage, more Areas Where Used, Shared=Yes, more recent Last Updated,
+    then a stable lower-report_uid tiebreaker. NOT chosen on field coverage alone.
     """
     def key(m):
-        run = _ts(m.get("last_run_date"))
-        run_rank = run.value if run is not None else -1
-        risk = _num(m.get("total_risk_score"))
-        risk = risk if risk is not None else 1e9   # missing risk = worst
+        eff = _ts(m.get("effective_last_run_date")) or _ts(m.get("last_run_date"))
+        eff_rank = eff.value if eff is not None else -1
+        lu = _ts(m.get("last_updated"))
+        lu_rank = lu.value if lu is not None else -1
         return (
-            _effective_field_count(m),   # 0 when field extraction unavailable (neutral)
-            -risk,
-            run_rank,
-            _num(m.get("times_run")) or -1,
-            int(_active_owner(m)),
-            _metadata_completeness(m),
+            -_overall(m),                          # lower Overall Score wins
+            eff_rank,                              # more recent effective last run
+            _recurrence_rank(m),                   # stronger recurrence
+            _num(m.get("distinct_requesters")) or 0,
+            _effective_field_count(m),             # field coverage (not the primary signal)
+            _distinct_area_count(m),               # more Areas Where Used
             int(_shared_yes(m)),
-            int(_has(m, "areas_used")),
-            int(_has(m, "landing_page")),
-            -m["report_uid"],
+            lu_rank,                               # more recent Last Updated
+            -m["report_uid"],                      # stable tiebreak
         )
 
     keeper = max(group_members, key=key)
-    reason = (f"Suggested keeper because it has the most report fields "
-              f"({_effective_field_count(keeper)}) and the lowest risk score "
-              f"({int(_num(keeper.get('total_risk_score')) or 0)}) in its group.")
+    reason = (f"Recommended keeper: lowest Overall Decommissioning Score "
+              f"({int(_overall(keeper)) if _overall(keeper) < 1e9 else 'n/a'}) with the most "
+              f"recent effective last run in its group.")
     return keeper["report_uid"], reason
 
 
@@ -195,28 +202,29 @@ def _member_reason(classification: str, keeper_name: str) -> str:
 def resolve_recommendation(r: dict, group, records_by_uid: dict[int, dict], cfg) -> str:
     """Return the suggested_action for one report.
 
-    `group` is the DupGroup the report belongs to (or None).
+    Built from the Overall-Score recommendation label, with duplicate flags
+    adjusting the WORDING only — never the numeric score (`group` is the DupGroup
+    the report belongs to, or None).
     """
+    base = r.get("recommendation") or r.get("band") or "Keep"
+
+    # Is this report duplicate-flagged? Either by the weighted model or by being a
+    # non-keeper member of a confirmed field-duplicate group.
+    in_group_non_keeper = group is not None and r["report_uid"] != group.keeper_uid
+    is_dup = bool(r.get("potential_duplicate")) or in_group_non_keeper
+
     if r.get("is_hard_rule"):
-        return HARD_RULE_RECOMMENDATION
+        return f"{base}; duplicate keeper identified" if is_dup else base
 
-    band = r.get("recommendation") or r.get("band") or "Keep"
-
-    if group is None:
-        # Report is not in a confirmed duplicate group but may still have been
-        # flagged as metadata-similar with missing field evidence.
+    if not is_dup:
+        # Surface a metadata-similar-but-unconfirmed report for manual review.
         if r.get("duplicate_classification") == "Metadata Similar - Fields Unavailable":
             return "Needs Manual Review - Field Comparison Missing"
-        return band
+        return base
 
-    if r["report_uid"] == group.keeper_uid:
-        return "Keep"
-
-    classification = r.get("duplicate_classification", "")
-    if classification in _STRONG:
-        return "Delete Duplicate After Migration"
-    if classification in _CONSOLIDATE:
-        return "Consolidate After Review"
-    if classification == "Metadata Similar - Fields Unavailable":
-        return "Needs Manual Review - Field Comparison Missing"
-    return "Needs Manual Review"
+    overall = r.get("overall_score")
+    if overall is not None and overall >= 60:
+        return "Consolidation Review"
+    if overall is not None and overall < 40:
+        return "Duplicate Consolidation Review; active report may be the keeper"
+    return f"{base}; possible duplicate"

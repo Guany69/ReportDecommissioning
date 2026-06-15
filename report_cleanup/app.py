@@ -65,10 +65,10 @@ hard = sum(1 for r in records if r.get("is_hard_rule"))
 band = lambda b: sum(1 for r in records if not r.get("is_hard_rule") and r.get("recommendation") == b)
 k = st.columns(6)
 k[0].metric("Total", len(records))
-k[1].metric("Hard rule", hard)
-k[2].metric("Decommission Review", band("Decommission Review"))
-k[3].metric("Consolidation Candidate", band("Consolidation Candidate"))
-k[4].metric("Low Priority Review", band("Low Priority Review"))
+k[1].metric("Hard rule (100)", hard)
+k[2].metric("High-Priority Review", band("High-Priority Decommissioning Review"))
+k[3].metric("Decommissioning Review", band("Decommissioning Review"))
+k[4].metric("Owner Review / Monitor", band("Owner Review / Monitor"))
 k[5].metric("Dup groups", len(groups))
 
 st.bar_chart(df["recommendation"].value_counts())
@@ -106,14 +106,15 @@ with t1:
     show = mask_df(fdf) if sensitive_mode_enabled() else fdf
 
     NAME_COL = "Report Name"
-    SUGG_COL = "recommendation"   # the band/hard-rule suggestion (Consolidation, Review, etc.)
+    SCORE_COL = "Overall Score"
+    SUGG_COL = "recommendation"   # the Overall-Score recommendation label
     TRAIL_COL = "Reason Trail"
     detail_cols = [c for c in show.columns if c not in (NAME_COL, TRAIL_COL)]
 
-    # Table shows report name, the suggestion, and the reason trail; all other
-    # fields live behind the dropdown below so the page isn't a wide column dump.
-    summary_cols = [c for c in (NAME_COL, SUGG_COL, TRAIL_COL) if c in show.columns]
-    summary = show[summary_cols].rename(columns={SUGG_COL: "Suggestion"})
+    # Table shows report name, overall score, the recommendation, and the reason
+    # trail; all other fields live behind the dropdown so the page isn't a column dump.
+    summary_cols = [c for c in (NAME_COL, SCORE_COL, SUGG_COL, TRAIL_COL) if c in show.columns]
+    summary = show[summary_cols].rename(columns={SUGG_COL: "Recommendation"})
     st.dataframe(summary, use_container_width=True, hide_index=True)
 
     if show.empty:
@@ -163,9 +164,20 @@ with t3:
     rows = [{"Category": rs.category, "Reason": rs.label,
              "Points": "" if rs.points is None else rs.points}
             for rs in r.get("all_reasons", [])]
-    st.write(f"**Total risk:** {'(hard rule)' if r.get('is_hard_rule') else r.get('total_risk_score')}"
+    rec = r.get("recurrence") or {}
+    st.write(f"**Overall Score:** {r.get('overall_score')}"
              f"  |  **Recommendation:** {r.get('recommendation')}"
              f"  |  **Suggested action:** {r.get('suggested_action')}")
+    st.write(f"**Hard rule:** {r.get('hard_rule_name') or 'No'}"
+             f"  |  **Effective last run:** {r.get('effective_last_run_date')}"
+             f"  |  **Cleanup:** {r.get('cleanup_risk_points')}/{r.get('cleanup_risk_max')}"
+             f"  |  **Protection credit:** {r.get('business_protection_credit')}")
+    st.write(f"**Recurrence:** {rec.get('classification')} ({rec.get('cadence')})"
+             f"  |  **Potential duplicate of:** {r.get('potential_duplicate_of') or '—'}"
+             f"  |  **Duplicate similarity:** {r.get('duplicate_similarity') or '—'}"
+             f"  ({r.get('duplicate_relationship')})")
+    if r.get("data_quality_flags"):
+        st.write("**Data-quality flags:** " + "; ".join(r["data_quality_flags"]))
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 with t4:

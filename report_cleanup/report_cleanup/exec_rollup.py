@@ -1,84 +1,113 @@
-"""Collapse Table 2 (many usage rows per report) to one row per report key.
+"""Collapse the Runs export (many execution rows per report) to one rollup per report.
 
-Produces both a composite-key rollup (name|type|owner) and a name-only rollup
-so join.py can fall back when Type/Owner are blank or differ across tables.
+Reports are keyed by the EXACT normalized report name (clean.normalize_report_name)
+because Comprehensive.Custom Report and Runs.Report Name are guaranteed to carry
+identical names. We deliberately do NOT key on type/owner: a single report's runs
+must all aggregate together even when the Runs owner/type differs from Comprehensive
+(owner drift is itself surfaced as a flag elsewhere).
+
+The Runs export covers roughly six months, so its row count is a windowed metric
+and must never be compared against the Comprehensive long-term execution count.
 """
 from __future__ import annotations
 
 import pandas as pd
 
-from .clean import normalize_name, text
+from .clean import normalize_report_name, text
 
 
-def _key(name, rtype, owner, name_noise) -> str:
-    return "|".join([
-        normalize_name(name, name_noise),
-        text(rtype).lower(),
-        text(owner).lower(),
-    ])
+def _valid_ts(v):
+    """Return a Timestamp if v is a real date, else None."""
+    if v is None or pd.isna(v):
+        return None
+    try:
+        ts = pd.Timestamp(v)
+    except (TypeError, ValueError):
+        return None
+    return None if pd.isna(ts) else ts
 
 
-def _name_key(name, name_noise) -> str:
-    return normalize_name(name, name_noise)
+def build_exec_rollup(t2: pd.DataFrame, name_noise=None) -> dict:
+    """Return {name_key: rollup} aggregating every Runs row for that report name.
 
+    ``name_noise`` is accepted for call-site compatibility but intentionally
+    unused — the join key is exact, not de-noised.
 
-def build_exec_rollup(t2: pd.DataFrame, name_noise) -> dict:
-    """Return {'composite': {key: rollup}, 'name': {name_key: rollup_or_AMBIGUOUS}}.
-
-    A name-only key that maps to more than one distinct composite group is marked
-    ambiguous (None) so the join never guesses which report the usage belongs to.
+    Each rollup entry contains:
+      runs_exec_count        total Runs rows (windowed ~6 months)
+      latest_runs_start      max valid Start Date and Time
+      latest_runs_last_run   max valid Runs Last Run Date
+      latest_runs_execution  max(latest_runs_start, latest_runs_last_run)
+      distinct_requesters    count of distinct non-blank requesters
+      exec_modes             comma-joined sorted execution modes
+      start_timestamps       sorted list of valid Start Date timestamps (recurrence)
+      t2_owner               an observed Runs owner (for owner-mismatch flagging)
     """
-    composite: dict[str, dict] = {}
-    name_groups: dict[str, set] = {}
-
     if t2 is None or len(t2) == 0:
-        return {"composite": {}, "name": {}}
+        return {}
 
     has = lambda c: c in t2.columns
+    agg: dict[str, dict] = {}
+
     for _, row in t2.iterrows():
         name = row.get("t2_report_name") if has("t2_report_name") else None
-        rtype = row.get("t2_report_type") if has("t2_report_type") else None
+        nk = normalize_report_name(name)
+        if not nk:
+            continue
+
         owner = row.get("t2_report_owner") if has("t2_report_owner") else None
-        start = row.get("t2_start_date") if has("t2_start_date") else pd.NaT
-        req_id = row.get("t2_requested_id") if has("t2_requested_id") else None
-        mode = row.get("t2_exec_mode") if has("t2_exec_type") else None
+        start = _valid_ts(row.get("t2_start_date")) if has("t2_start_date") else None
+        last_run = _valid_ts(row.get("t2_last_run_date")) if has("t2_last_run_date") else None
+        # Requester breadth uses the human name; fall back to the employee id.
+        requester = None
+        if has("t2_requested_by"):
+            requester = text(row.get("t2_requested_by")) or None
+        if requester is None and has("t2_requested_id"):
+            requester = text(row.get("t2_requested_id")) or None
+        mode = row.get("t2_exec_mode") if has("t2_exec_mode") else None
 
-        ck = _key(name, rtype, owner, name_noise)
-        nk = _name_key(name, name_noise)
-
-        agg = composite.setdefault(ck, {
-            "exec_count": 0, "dates": [], "requesters": set(), "modes": set(),
+        a = agg.setdefault(nk, {
+            "runs_exec_count": 0,
+            "start_dates": [],
+            "last_run_dates": [],
+            "requesters": set(),
+            "modes": set(),
             "owner": text(owner),
+            "unparsed_start_count": 0,
         })
-        agg["exec_count"] += 1
-        if not pd.isna(start):
-            agg["dates"].append(start)
-        if not (req_id is None or pd.isna(req_id)):
-            agg["requesters"].add(str(req_id))
-        if not (mode is None or pd.isna(mode)):
-            agg["modes"].add(str(mode))
+        a["runs_exec_count"] += 1
+        if start is not None:
+            a["start_dates"].append(start)
+        elif has("t2_start_date"):
+            # A Runs row with no usable Start timestamp (blank or unparseable):
+            # excluded from recurrence, but the row still counts as a run.
+            a["unparsed_start_count"] += 1
+        if last_run is not None:
+            a["last_run_dates"].append(last_run)
+        if requester:
+            a["requesters"].add(requester)
+        if mode is not None and not pd.isna(mode):
+            m = text(mode)
+            if m:
+                a["modes"].add(m)
+        if not a["owner"] and text(owner):
+            a["owner"] = text(owner)
 
-        name_groups.setdefault(nk, set()).add(ck)
-
-    # Finalize composite rollups.
-    comp_final = {}
-    for ck, agg in composite.items():
-        dates = agg["dates"]
-        comp_final[ck] = {
-            "exec_count": agg["exec_count"],
-            "last_exec_date": max(dates) if dates else pd.NaT,
-            "first_exec_date": min(dates) if dates else pd.NaT,
-            "distinct_requesters": len(agg["requesters"]),
-            "exec_modes": ", ".join(sorted(agg["modes"])),
-            "t2_owner": agg["owner"],
+    rollup: dict[str, dict] = {}
+    for nk, a in agg.items():
+        latest_start = max(a["start_dates"]) if a["start_dates"] else pd.NaT
+        latest_last_run = max(a["last_run_dates"]) if a["last_run_dates"] else pd.NaT
+        candidates = [d for d in (latest_start, latest_last_run) if not pd.isna(d)]
+        latest_exec = max(candidates) if candidates else pd.NaT
+        rollup[nk] = {
+            "runs_exec_count": a["runs_exec_count"],
+            "latest_runs_start": latest_start,
+            "latest_runs_last_run": latest_last_run,
+            "latest_runs_execution": latest_exec,
+            "distinct_requesters": len(a["requesters"]),
+            "exec_modes": ", ".join(sorted(a["modes"])),
+            "start_timestamps": sorted(a["start_dates"]),
+            "unparsed_start_count": a["unparsed_start_count"],
+            "t2_owner": a["owner"],
         }
-
-    # name-only rollup: only usable when it maps to exactly one composite group.
-    name_final = {}
-    for nk, cks in name_groups.items():
-        if len(cks) == 1:
-            name_final[nk] = comp_final[next(iter(cks))]
-        else:
-            name_final[nk] = None  # ambiguous
-
-    return {"composite": comp_final, "name": name_final}
+    return rollup

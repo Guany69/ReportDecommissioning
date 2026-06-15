@@ -3,9 +3,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from collections import Counter
+
 import pandas as pd
 
 from . import schema
+from .clean import normalize_report_name
 
 
 @dataclass
@@ -13,6 +16,7 @@ class ValidationReport:
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     field_coverage: dict[str, float] = field(default_factory=dict)
+    duplicate_report_names: list[str] = field(default_factory=list)
 
     def has_fatal(self) -> bool:
         return bool(self.errors)
@@ -46,6 +50,20 @@ def validate(t1: pd.DataFrame, t2: pd.DataFrame | None, t1_map, t2_map) -> Valid
     if "report_name" not in t1_map:
         vr.errors.append("Table 1 has no mappable 'Report Name' column (required as identity/join key).")
         return vr
+
+    # Normalized Custom Report names must be unique — duplicates would let two
+    # unrelated rows collide on the exact join key. Surface clearly; do not merge.
+    name_col = t1_map["report_name"]
+    keys = [normalize_report_name(v) for v in t1[name_col].tolist()]
+    dup_counts = {k: c for k, c in Counter(k for k in keys if k).items() if c > 1}
+    if dup_counts:
+        sample = ", ".join(sorted(dup_counts)[:5])
+        more = "" if len(dup_counts) <= 5 else f" (+{len(dup_counts) - 5} more)"
+        vr.warnings.append(
+            f"Table 1 has {len(dup_counts)} duplicate normalized 'Custom Report' "
+            f"name(s) — execution data may be attributed to multiple rows: {sample}{more}."
+        )
+        vr.duplicate_report_names = sorted(dup_counts)
 
     # Table 2 is optional but, if present, must have a report name.
     if t2 is None or len(t2) == 0:

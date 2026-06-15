@@ -50,3 +50,4 @@ temp/
 # Allow the intentional, clearly-fake sample inputs to be committed if desired.
 !report_cleanup/sample_data/metadata.csv
 !report_cleanup/sample_data/execution.csv
+!report_cleanup/sample_data/fields.csv

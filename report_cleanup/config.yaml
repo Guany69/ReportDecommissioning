@@ -19,12 +19,16 @@ aliases:
 
   report_tag:     ["report tag", "tag", "tags"]
   category:       ["category"]
-  landing_page:   ["worklet landing pages", "worklet landing page", "landing page", "landing pages"]
+  # "Worklet Landing Pages" and the standalone "Landing Page" are DISTINCT source
+  # columns in the comprehensive export; the orphan-worklet hard rule needs both.
+  landing_page:        ["worklet landing pages", "worklet landing page"]
+  report_landing_page: ["landing page", "landing pages"]
   owner:          ["owner"]
   created_by:     ["created by", "author"]
   description:    ["description", "desc", "notes"]
   created_date:   ["created date", "created", "date created"]
-  times_run:      ["number of times", "number of times run", "times run", "run count", "executions", "number of runs"]
+  available_usage: ["available usage"]
+  times_run:      ["number of times executed", "number of times", "number of times run", "times run", "run count", "executions", "number of runs"]
   last_updated:   ["last updated date", "last updated", "modified", "last modified"]
   last_run_date:  ["last run date", "last run", "last executed"]
   last_run_by:    ["last run by", "run by"]
@@ -37,15 +41,18 @@ aliases:
   areas_used:     ["areas where used", "areas used", "used in", "area where used"]
   report_fields:  ["report fields", "fields", "field list", "columns", "column list"]
   owner_active:   ["owner active", "owner status", "active", "is active", "owner state"]
-  # ---- Table 2: execution / request ----
-  t2_report_name:  ["custom report", "report name", "name"]
+  # ---- Table 2: execution / request (Runs export) ----
+  t2_report_name:  ["report name", "custom report", "name"]
   t2_report_type:  ["report type", "type"]
   t2_report_owner: ["report owner", "owner"]
-  t2_start_date:   ["start date", "execution date", "run date"]
+  t2_data_source:  ["report data source name", "data source", "datasource", "source"]
+  t2_start_date:   ["start date and time", "start date", "execution date", "run date"]
+  t2_last_run_date: ["last run date", "last run", "last executed"]
   t2_requested_by: ["requested by name", "requested by", "requester"]
   t2_requested_id: ["requested by employee id", "employee id", "requester id", "requested by id"]
   t2_exec_mode:    ["execution mode", "mode"]
   t2_exec_type:    ["execution type", "exec type"]
+  t2_areas_used:   ["area where used", "areas where used", "areas used", "used in"]
   # ---- Table 3: field export / data dictionary / where-used ----
   t3_report_name:              ["report name", "custom report", "custom report name", "where used report", "report"]
   t3_report_id:                ["report id", "custom report id", "report reference id"]
@@ -114,6 +121,7 @@ flags:
 # Stage 2: only candidates get their Report Fields compared (Jaccard + containment).
 dedup:
   block_prefix_len: 4                 # name-prefix block size (keeps it near-linear)
+  max_block_size: 400                 # skip non-discriminative blocks (e.g. a field in 1000s of reports)
   name_similarity_strong: 75          # Stage-1 condition 1
   name_similarity_moderate: 60        # Stage-1 conditions 2 & 3
   candidate_score_threshold: 70       # alt Stage-1 gate on candidate_similarity_score
@@ -164,3 +172,81 @@ duplicates:
   field_jaccard_threshold: 50             # mirrors dedup.group_min_field_similarity
   field_containment_threshold: 80         # mirrors dedup.group_min_field_containment
   metadata_only_duplicate_behavior: manual_review_only  # pairs with no fields go to manual review
+
+# ===========================================================================
+# Overall Decommissioning Score model (0..100) — added in the scoring overhaul.
+# Cleanup risk (0..60 above) is one INPUT; business protection credits subtract;
+# hard rules pin the score to 100. Duplicate evidence never moves the score.
+# ===========================================================================
+
+# ---- Hard rules ----------------------------------------------------------
+hard_rules:
+  dnu:
+    enabled: true
+    word_boundary: true        # match \bdnu\b, not a raw substring
+  orphan_worklet:
+    enabled: true
+
+# ---- Overall score assembly ----------------------------------------------
+overall:
+  cleanup_risk_max: 60         # denominator for cleanup_percentage
+  soft_score_cap: 99           # normal scores capped here; 100 reserved for hard rules
+  hard_rule_score: 100
+
+# ---- Business-protection credits (points SUBTRACTED from cleanup %) -------
+business_protection:
+  max_credit: 20               # total credit is capped here
+  recurrence:                  # one tier only (from recurrence detection)
+    strong: 8
+    moderate: 4
+  requesters:                  # one tier only (distinct non-blank Requested By in Runs)
+    five_or_more: 4
+    two_to_four: 2
+  context:                     # these stack
+    multiple_areas: 3          # used in >1 distinct Area Where Used
+    active_placement: 3        # active worklet OR a populated landing page
+    shared_yes: 2
+
+# ---- Recurring-execution detection (timestamps only) ----------------------
+recurrence:
+  burst_window_minutes: 30     # executions within this window collapse to 1 occurrence
+  strong_min_occurrences: 4
+  strong_min_intervals: 3
+  strong_match_threshold: 0.75 # fraction of intervals fitting one cadence
+  moderate_min_occurrences: 3
+  cadences:
+    daily:    {min_days: 1,  max_days: 2}
+    weekly:   {min_days: 5,  max_days: 9}
+    biweekly: {min_days: 11, max_days: 17}
+    monthly:  {min_days: 25, max_days: 36}
+
+# ---- Recommendation thresholds (Overall Score 0..100) ---------------------
+# Evaluated high -> low; first satisfied min wins. Must cover 0 with no gaps.
+recommendation:
+  thresholds:
+    - {min: 100, label: "Automatic Decommissioning Recommendation"}
+    - {min: 80,  label: "High-Priority Decommissioning Review"}
+    - {min: 60,  label: "Decommissioning Review"}
+    - {min: 40,  label: "Owner Review / Monitor"}
+    - {min: 0,   label: "Keep"}
+
+# ---- Weighted duplicate similarity (must sum to 1.0) ----------------------
+duplicate_weights:
+  field_jaccard: 0.40
+  smaller_containment: 0.20
+  business_object: 0.10
+  name: 0.10
+  built_in_prompts: 0.07
+  related_business_object: 0.05
+  data_source: 0.04
+  authorized_usage: 0.02
+  report_type: 0.02
+
+# ---- Duplicate classification thresholds (percent) ------------------------
+duplicate_thresholds:
+  strong: 90
+  likely: 80
+  possible: 70
+  containment_relationship: 95     # smaller-report containment for the subset label
+  relationship_min_overall: 80     # overall similarity required alongside containment
+  candidate_name_similarity: 50    # low candidate gate used by blocking

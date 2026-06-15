@@ -10,16 +10,18 @@ import re
 
 # Canonical fields belonging to each table (drives validation + mapping scope).
 TABLE1_FIELDS = [
-    "report_name", "report_tag", "category", "landing_page", "owner", "created_by",
-    "description", "created_date", "times_run", "last_updated", "last_run_date",
+    "report_name", "report_tag", "category", "landing_page", "report_landing_page",
+    "owner", "created_by", "description", "created_date", "available_usage",
+    "times_run", "last_updated", "last_run_date",
     "last_run_by", "data_source", "report_type", "worklet", "chart_type", "shared",
     "report_prompts", "areas_used", "owner_active",
     # NOTE: report_fields is intentionally absent — field data now comes exclusively
     # from table3 (the field export). See field_rollup.py.
 ]
 TABLE2_FIELDS = [
-    "t2_report_name", "t2_report_type", "t2_report_owner", "t2_start_date",
-    "t2_requested_by", "t2_requested_id", "t2_exec_mode", "t2_exec_type",
+    "t2_report_name", "t2_report_type", "t2_report_owner", "t2_data_source",
+    "t2_start_date", "t2_last_run_date", "t2_requested_by", "t2_requested_id",
+    "t2_exec_mode", "t2_exec_type", "t2_areas_used",
 ]
 TABLE3_FIELDS = [
     "t3_report_name", "t3_report_id", "t3_where_used",
@@ -38,9 +40,10 @@ SCORING_FIELDS = [
 # How each canonical field should be cleaned (see clean.py).
 FIELD_TYPES = {
     "created_date": "date", "last_updated": "date", "last_run_date": "date",
-    "t2_start_date": "date",
+    "t2_start_date": "date", "t2_last_run_date": "date",
     "times_run": "number",
     "worklet": "bool", "shared": "bool",
+    "t3_where_used": "multiline",   # newlines are report-name separators — preserve them
 }
 
 

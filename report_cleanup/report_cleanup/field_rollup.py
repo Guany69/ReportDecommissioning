@@ -1,12 +1,16 @@
-"""Extract report field data from a third-party field / data-dictionary export (table3).
+"""Extract report field data from the Fields export (table3) via Where_Used.
 
-The third export may contain either:
-  (a) A report-to-field mapping — each row links a field to a specific report via
-      Report Name, Report ID, or a Where_Used column.  We roll fields up per report
-      and attach the field sets to the main report records so duplicate detection
-      can use real field-level evidence.
-  (b) A field catalog — fields are described but not linked to individual reports.
-      We emit a diagnostic and skip field-based duplicate detection entirely.
+Each Fields row is ONE unique field — we never merge rows or judge whether two
+rows describe "the same" field. Every source row is assigned a stable field ID
+(its source-row index). A row's Where_Used cell lists the reports that use that
+field, one per line; we split on line breaks, exact-normalize each report name
+(clean.normalize_report_name), and add the field ID to every matching report's
+field set. Two reports therefore "share a field" only when the same Fields row
+listed both of them.
+
+For backward compatibility with older field exports that carry an explicit
+Report Name / Report ID column, those are honored as a fallback when no
+Where_Used column is present.
 
 Entry points used by pipeline.py:
   validate_field_table()      — decide mode before cleaning
@@ -20,7 +24,7 @@ from dataclasses import dataclass, field as dc_field
 
 import pandas as pd
 
-from .clean import is_null, normalize_name, text
+from .clean import is_null, normalize_report_name, text
 
 # ---- Mode constants -------------------------------------------------------
 FIELD_EXPORT_MODE_MISSING = "missing"
@@ -61,12 +65,12 @@ def validate_field_table(t3_raw, t3_map: dict) -> FieldTableValidation:
             "field analysis unavailable."
         )
 
-    has_report_key = any(k in t3_map for k in ("t3_report_name", "t3_report_id", "t3_where_used"))
+    has_report_key = any(k in t3_map for k in ("t3_where_used", "t3_report_name", "t3_report_id"))
 
     if not has_report_key:
         vr.mode = FIELD_EXPORT_MODE_CATALOG_ONLY
         vr.warnings.append(
-            "Field export has no Report Name, Report ID, or Where_Used column — "
+            "Field export has no Where_Used, Report Name, or Report ID column — "
             "treating as a field catalog. Fields cannot be mapped to individual reports; "
             "field-based duplicate detection is disabled."
         )
@@ -77,63 +81,32 @@ def validate_field_table(t3_raw, t3_map: dict) -> FieldTableValidation:
 
 
 # ---- Key normalization ----------------------------------------------------
-def _norm_report_key(v, name_noise) -> str:
-    """Normalized report name key — identical convention to join.py."""
-    return normalize_name(v, name_noise)
+def _norm_report_key(v) -> str:
+    """EXACT report-name key (case-insensitive, whitespace-collapsed)."""
+    return normalize_report_name(v)
 
 
 def _norm_report_id(v) -> str:
     return text(v).lower().strip()
 
 
-def _norm_field_name(v) -> str:
-    s = text(v).lower()
-    s = re.sub(r"[\s_]+", " ", s).strip()
-    return s
-
-
-def build_field_key(row: dict, field_key_parts: list[str]) -> str:
-    """Stable field identifier: business_object|field_name|related_bo|field_type.
-
-    Uses the configured field_key_parts list so operators can tune which
-    columns make a field unique without changing Python code.
-    """
-    parts = [_norm_field_name(text(row.get(f"t3_{p}", ""))) for p in field_key_parts]
-    return "|".join(parts)
-
-
 # ---- Where_Used parser ----------------------------------------------------
-_WHERE_USED_SPLIT = re.compile(r"[\n\r;|•·–—]+")
+# Report names inside Where_Used are separated by line breaks only. Support
+# \n, \r\n, and \r — nothing else (commas/semicolons can appear inside names).
+_WHERE_USED_SPLIT = re.compile(r"\r\n|\r|\n")
 
 
-def parse_where_used(where_used_text: str, cfg) -> list[str]:
-    """Split a Where_Used cell value into a list of normalized report name keys.
+def parse_where_used(where_used_text: str) -> list[str]:
+    """Split a Where_Used cell into a list of EXACT-normalized report name keys.
 
-    Comma splitting is disabled by default (commas appear inside report names).
+    Blank lines are dropped; duplicates within the cell are collapsed.
     """
     if is_null(where_used_text):
         return []
-
-    fields_cfg = cfg.get("fields") or {}
-    allow_comma = fields_cfg.get("allow_comma_split_in_where_used", False)
-    name_noise = (cfg.clean or {}).get("name_noise", [])
-
-    raw = text(where_used_text)
-    parts = _WHERE_USED_SPLIT.split(raw)
-
-    if allow_comma:
-        expanded: list[str] = []
-        for p in parts:
-            expanded.extend(p.split(","))
-        parts = expanded
-
     seen: set[str] = set()
     out: list[str] = []
-    for p in parts:
-        cleaned = p.strip().strip('"').strip("'").strip()
-        if len(cleaned) < 2:
-            continue
-        key = _norm_report_key(cleaned, name_noise)
+    for part in _WHERE_USED_SPLIT.split(text(where_used_text)):
+        key = _norm_report_key(part)
         if key and key not in seen:
             seen.add(key)
             out.append(key)
@@ -144,22 +117,18 @@ def parse_where_used(where_used_text: str, cfg) -> list[str]:
 def build_report_field_rollup(t3: pd.DataFrame, cfg) -> dict:
     """Aggregate the canonical field-export DataFrame into one entry per report key.
 
-    Returns a dict with three keys:
-      rollup        — {report_key: {field_set, field_count, field_list_text,
-                                    field_signature, business_objects_used,
-                                    domains_used, categories_used, match_type}}
-      diagnostics   — counters for the diagnostics tab
-      unmatched_rows — rows that could not be attributed to any report
-      individual_rows — one dict per (report_key, field_key) pair for DB storage
+    Returns a dict with:
+      rollup          — {report_key: {field_set, field_count, field_list_text,
+                                       field_signature, business_objects/built_in_prompts/
+                                       related_bos/authorized_usage/domains/categories sets,
+                                       match_type}}
+      diagnostics     — counters for the diagnostics tab
+      unmatched_rows  — Fields rows that produced no report key at all
+      individual_rows — one dict per (report_key, field_id) link for DB storage
     """
     fields_cfg = cfg.get("fields") or {}
-    name_noise = (cfg.clean or {}).get("name_noise", [])
     prefer_id = fields_cfg.get("prefer_report_id", True)
     allow_where_used = fields_cfg.get("allow_where_used_parsing", True)
-    field_key_parts = fields_cfg.get(
-        "field_key_parts",
-        ["business_object", "field_name", "related_business_object", "report_field_type"],
-    )
 
     agg: dict[str, dict] = {}
     unmatched_rows: list[dict] = []
@@ -171,72 +140,79 @@ def build_report_field_rollup(t3: pd.DataFrame, cfg) -> dict:
         "total_unmatched_rows": 0,
         "total_where_used_rows_parsed": 0,
         "total_where_used_parse_failures": 0,
-        "ambiguous_report_matches": 0,
+        "blank_where_used_rows": 0,
+        "multi_report_field_rows": 0,
         "reports_with_duplicate_field_keys": 0,
     }
 
-    for _, row in t3.iterrows():
+    for idx, (_, row) in enumerate(t3.iterrows()):
         row_d = row.to_dict()
-        field_key = build_field_key(row_d, field_key_parts)
-        field_display = text(row_d.get("t3_field_name", ""))
+        # Stable per-row field ID — never merged with any other row.
+        field_id = f"f{idx}"
+        field_display = text(row_d.get("t3_field_name", "")) or field_id
         business_object = text(row_d.get("t3_business_object", ""))
         related_bo = text(row_d.get("t3_related_business_object", ""))
         report_field_type = text(row_d.get("t3_report_field_type", ""))
+        built_in_prompts = text(row_d.get("t3_built_in_prompts", ""))
         domain = text(row_d.get("t3_domain", ""))
         categories = text(row_d.get("t3_categories", ""))
         authorized_usage = text(row_d.get("t3_authorized_usage", ""))
 
-        # Determine report key(s) — prefer report_id, then report_name, then where_used.
+        # Determine report key(s): Where_Used first (the real linkage), then the
+        # legacy Report ID / Report Name fallbacks for older exports.
         report_keys: list[str] = []
         match_type = ""
 
+        where_used_val = text(row_d.get("t3_where_used", ""))
         report_id_val = text(row_d.get("t3_report_id", ""))
         report_name_val = text(row_d.get("t3_report_name", ""))
-        where_used_val = text(row_d.get("t3_where_used", ""))
 
-        if prefer_id and report_id_val:
-            rk = _norm_report_id(report_id_val)
-            if rk:
-                report_keys = [rk]
-                match_type = "report_id"
-        if not report_keys and report_name_val:
-            rk = _norm_report_key(report_name_val, name_noise)
-            if rk:
-                report_keys = [rk]
-                match_type = "report_name"
-        if not report_keys and allow_where_used and where_used_val:
+        if allow_where_used and "t3_where_used" in row_d and where_used_val:
             diag["total_where_used_rows_parsed"] += 1
-            keys = parse_where_used(where_used_val, cfg)
+            keys = parse_where_used(where_used_val)
             if keys:
                 report_keys = keys
                 match_type = "where_used"
                 if len(keys) > 1:
-                    diag["ambiguous_report_matches"] += 1
+                    diag["multi_report_field_rows"] += 1
             else:
                 diag["total_where_used_parse_failures"] += 1
+        elif allow_where_used and "t3_where_used" in row_d and not where_used_val:
+            diag["blank_where_used_rows"] += 1
 
-        if not report_keys or not field_key:
-            reason = "no_report_key" if not report_keys else "no_field_key"
-            unmatched_rows.append({**row_d, "_reason": reason})
+        if not report_keys and prefer_id and report_id_val:
+            rk = _norm_report_id(report_id_val)
+            if rk:
+                report_keys, match_type = [rk], "report_id"
+        if not report_keys and report_name_val:
+            rk = _norm_report_key(report_name_val)
+            if rk:
+                report_keys, match_type = [rk], "report_name"
+
+        if not report_keys:
+            unmatched_rows.append({**row_d, "_reason": "no_report_key", "_field_id": field_id})
             diag["total_unmatched_rows"] += 1
             continue
 
         for rk in report_keys:
-            if not rk:
-                continue
             acc = agg.setdefault(rk, {
                 "field_set": set(), "field_display_names": set(),
-                "business_objects": set(), "domains": set(), "categories": set(),
-                "match_type": match_type,
+                "business_objects": set(), "built_in_prompts": set(),
+                "related_bos": set(), "authorized_usage": set(),
+                "domains": set(), "categories": set(), "match_type": match_type,
             })
-            # Track duplicate field keys per report (diagnostic only).
-            if field_key in acc["field_set"]:
+            if field_id in acc["field_set"]:
                 diag["reports_with_duplicate_field_keys"] += 1
-            acc["field_set"].add(field_key)
-            if field_display:
-                acc["field_display_names"].add(field_display)
+            acc["field_set"].add(field_id)
+            acc["field_display_names"].add(field_display)
             if business_object:
-                acc["business_objects"].add(business_object)
+                acc["business_objects"].add(business_object.casefold())
+            if built_in_prompts:
+                acc["built_in_prompts"].add(built_in_prompts.casefold())
+            if related_bo:
+                acc["related_bos"].add(related_bo.casefold())
+            if authorized_usage:
+                acc["authorized_usage"].add(authorized_usage.casefold())
             if domain:
                 acc["domains"].add(domain)
             if categories:
@@ -244,19 +220,13 @@ def build_report_field_rollup(t3: pd.DataFrame, cfg) -> dict:
             diag["total_report_field_links"] += 1
 
             individual_rows.append({
-                "report_key": rk,
-                "field_key": field_key,
-                "field_name": field_display,
-                "business_object": business_object,
-                "related_business_object": related_bo,
-                "report_field_type": report_field_type,
-                "domain": domain,
-                "categories": categories,
-                "authorized_usage": authorized_usage,
+                "report_key": rk, "field_key": field_id, "field_name": field_display,
+                "business_object": business_object, "related_business_object": related_bo,
+                "report_field_type": report_field_type, "domain": domain,
+                "categories": categories, "authorized_usage": authorized_usage,
                 "source_match_type": match_type,
             })
 
-    # Finalize rollup entries.
     rollup: dict[str, dict] = {}
     for rk, acc in agg.items():
         fs = acc["field_set"]
@@ -265,6 +235,10 @@ def build_report_field_rollup(t3: pd.DataFrame, cfg) -> dict:
             "field_count": len(fs),
             "field_list_text": "; ".join(sorted(acc["field_display_names"])),
             "field_signature": "|".join(sorted(fs)),
+            "business_objects_set": acc["business_objects"],
+            "built_in_prompts_set": acc["built_in_prompts"],
+            "related_bos_set": acc["related_bos"],
+            "authorized_usage_set": acc["authorized_usage"],
             "business_objects_used": sorted(acc["business_objects"]),
             "domains_used": sorted(acc["domains"]),
             "categories_used": sorted(acc["categories"]),
@@ -286,19 +260,10 @@ def attach_report_fields(
     field_mode: str,
     cfg,
 ) -> list[dict]:
-    """Stamp field-set data from the rollup onto each report record.
-
-    Sets on each record (always, regardless of mode):
-      report_fields_set       set[str]   — used by dedup.detect_duplicates
-      report_fields           str | None — semicolon-separated display names for Excel/DB
-      field_count             int
-      field_signature         str | None — pipe-separated sorted field keys
-      business_objects_used   list[str]
-      domains_used            list[str]
-      categories_used         list[str]
-      field_extraction_status str        — STATUS_* constant
-    """
-    name_noise = (cfg.clean or {}).get("name_noise", [])
+    """Stamp field-set data from the rollup onto each report record (matched by
+    EXACT normalized report name, with a report_id fallback). Also records, in the
+    rollup diagnostics, which Where_Used report keys never matched a Comprehensive
+    report (unmatched_where_used_names) and per-report fields_mapped counts."""
     fields_cfg = cfg.get("fields") or {}
     prefer_id = fields_cfg.get("prefer_report_id", True)
 
@@ -310,6 +275,10 @@ def attach_report_fields(
         r["business_objects_used"] = []
         r["domains_used"] = []
         r["categories_used"] = []
+        r["business_objects_set"] = set()
+        r["built_in_prompts_set"] = set()
+        r["related_bos_set"] = set()
+        r["authorized_usage_set"] = set()
         r["field_extraction_status"] = status
 
     if field_mode == FIELD_EXPORT_MODE_MISSING:
@@ -323,6 +292,7 @@ def attach_report_fields(
         return records
 
     rollup = field_rollup_result.get("rollup", {})
+    matched_keys: set[str] = set()
 
     for r in records:
         report_id_val = text(r.get("report_id", ""))
@@ -334,21 +304,32 @@ def attach_report_fields(
             if candidate in rollup:
                 rk = candidate
         if rk is None:
-            candidate = _norm_report_key(report_name_val, name_noise)
+            candidate = _norm_report_key(report_name_val)
             if candidate in rollup:
                 rk = candidate
 
         entry = rollup.get(rk) if rk else None
         if entry:
-            r["report_fields_set"] = entry["field_set"]
-            r["field_count"] = entry["field_count"]
-            r["report_fields"] = entry["field_list_text"]
-            r["field_signature"] = entry["field_signature"]
-            r["business_objects_used"] = entry["business_objects_used"]
-            r["domains_used"] = entry["domains_used"]
-            r["categories_used"] = entry["categories_used"]
+            matched_keys.add(rk)
+            r["report_fields_set"] = entry.get("field_set", set())
+            r["field_count"] = entry.get("field_count", len(entry.get("field_set", set())))
+            r["report_fields"] = entry.get("field_list_text")
+            r["field_signature"] = entry.get("field_signature")
+            r["business_objects_used"] = entry.get("business_objects_used", [])
+            r["domains_used"] = entry.get("domains_used", [])
+            r["categories_used"] = entry.get("categories_used", [])
+            r["business_objects_set"] = entry.get("business_objects_set", set())
+            r["built_in_prompts_set"] = entry.get("built_in_prompts_set", set())
+            r["related_bos_set"] = entry.get("related_bos_set", set())
+            r["authorized_usage_set"] = entry.get("authorized_usage_set", set())
             r["field_extraction_status"] = STATUS_MATCHED
         else:
             _blank(r, STATUS_NO_FIELDS)
+
+    # Where_Used report keys that no Comprehensive report claimed.
+    unmatched = sorted(set(rollup) - matched_keys)
+    diag = field_rollup_result.setdefault("diagnostics", {})
+    diag["unmatched_where_used_reports"] = len(unmatched)
+    field_rollup_result["unmatched_where_used_names"] = unmatched
 
     return records

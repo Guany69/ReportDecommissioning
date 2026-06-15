@@ -19,10 +19,15 @@ from .field_rollup import (
     validate_field_table,
 )
 from .flags import build_all_flags
-from .hard_rules import apply_hard_rules
+from .hard_rules import apply_hard_rules, has_recent_or_recurring_usage
 from .io_readers import file_sha256, read_any
 from .join import derive_effective_last_run, join_reports
-from .recommend import apply_duplicate_analysis, resolve_recommendation
+from .overall import calculate_overall_score
+from .protection import calculate_protection_credit
+from .recurrence import detect_recurrence
+from .duplicate_similarity import compute_duplicate_matches
+from .recommend import (apply_duplicate_analysis, recommend_label,
+                        resolve_recommendation)
 from .soft_scoring import Reason, score_report
 from .validate import validate
 
@@ -88,31 +93,65 @@ def run_pipeline(
     records = derive_effective_last_run(records)
     by_uid = {r["report_uid"]: r for r in records}
 
+    # 7b. RECURRENCE — inferred from Runs execution timestamps only.
+    for r in records:
+        rr = detect_recurrence(r.get("runs_start_timestamps", []), cfg).as_dict()
+        r["recurrence"] = rr
+        r["recurrence_classification"] = rr["classification"]
+        r["recurrence_cadence"] = rr["cadence"]
+        r["recurrence_match_percentage"] = rr["match_percentage"]
+
     # 8. ATTACH FIELD SETS — must happen before duplicate detection
     attach_report_fields(records, field_rollup_result, field_mode, cfg)
 
-    # 9. HARD RULES
+    # 9-10. SCORING: hard rules -> cleanup risk -> protection credit -> Overall Score.
+    # Duplicate evidence is NOT an input here (it only affects wording later).
     for r in records:
-        hit = apply_hard_rules(r)
+        hit = apply_hard_rules(r, cfg)
         r["is_hard_rule"] = bool(hit)
+        r["hard_rule_triggered"] = bool(hit)
         r["hard_rule_id"] = hit.rule_id if hit else None
+        r["hard_rule_name"] = hit.name if hit else None
+        r["hard_rule_reason"] = hit.reason if hit else None
         r["all_reasons"] = []
         if hit:
-            r["all_reasons"].append(Reason("hard_rule", hit.reason, None))
-            r["total_risk_score"] = None
-            r["usage_risk"] = r["age_risk"] = r["usage_context_risk"] = None
-            r["recommendation"] = None
+            r["all_reasons"].append(Reason("hard_rule", f"{hit.name}: {hit.reason}", None))
 
-    # 10. RISK SCORING (skip hard-rule rows)
-    for r in records:
-        if not r["is_hard_rule"]:
-            res = score_report(r, cfg)
-            r["total_risk_score"] = res.total_risk_score
-            r["usage_risk"] = res.usage_risk
-            r["age_risk"] = res.age_risk
-            r["usage_context_risk"] = res.usage_context_risk
-            r["recommendation"] = res.recommendation
-            r["all_reasons"].extend(res.reasons)
+        # Cleanup risk (0..60) computed for every report for transparency.
+        res = score_report(r, cfg)
+        r["usage_risk"] = res.usage_risk
+        r["age_risk"] = res.age_risk
+        r["usage_context_risk"] = res.usage_context_risk
+        r["cleanup_risk_points"] = res.total_risk_score
+        r["total_risk_score"] = res.total_risk_score   # legacy alias (0..60)
+        r["cleanup_reasons"] = list(res.reasons)
+
+        # Business-protection credit (never applied to hard-rule rows).
+        recurrence = r.get("recurrence")  # populated in Phase 2; None here
+        if hit:
+            credit, protection_reasons = 0, []
+        else:
+            credit, protection_reasons = calculate_protection_credit(r, recurrence, cfg)
+        r["protection_reasons"] = protection_reasons
+
+        # Overall Decommissioning Score (0..100; 100 reserved for hard rules).
+        ov = calculate_overall_score(res.total_risk_score, credit, bool(hit), cfg)
+        r["overall_score"] = ov.overall_score
+        r["cleanup_risk_max"] = ov.cleanup_risk_max
+        r["cleanup_percentage"] = ov.cleanup_percentage
+        r["business_protection_credit"] = ov.business_protection_credit
+        r["recommendation"] = recommend_label(ov.overall_score, cfg)
+
+        # Assemble the full reason trail.
+        r["all_reasons"].extend(res.reasons)
+        r["all_reasons"].extend(protection_reasons)
+        r["all_reasons"].extend(ov.reasons)
+
+        # Conflict warning: hard-ruled but still actively used.
+        if hit and has_recent_or_recurring_usage(r, cfg):
+            warn = "Recent or recurring usage exists despite the hard-rule designation."
+            r["all_reasons"].append(Reason("hard_rule", warn, None))
+            r.setdefault("conflict_warnings", []).append(warn)
 
     # 11. OWNERSHIP / DATA-QUALITY FLAGS (no score weight)
     for r in records:
@@ -121,6 +160,9 @@ def run_pipeline(
     # 12. DUPLICATE DETECTION (two-stage) + KEEPER / per-member dup analysis
     groups, meta_only_pairs = detect_duplicates(records, cfg)
     apply_duplicate_analysis(by_uid, groups, cfg)
+
+    # 12b. WEIGHTED DUPLICATE SIMILARITY (evidence only — never changes the score).
+    compute_duplicate_matches(records, cfg)
     group_of = {}
     for g in groups:
         for u in g.members:
@@ -158,7 +200,9 @@ def run_pipeline(
         "total_unmatched_field_rows": field_rollup_result["diagnostics"].get("total_unmatched_rows", 0),
         "total_where_used_rows_parsed": field_rollup_result["diagnostics"].get("total_where_used_rows_parsed", 0),
         "total_where_used_parse_failures": field_rollup_result["diagnostics"].get("total_where_used_parse_failures", 0),
-        "ambiguous_report_matches": field_rollup_result["diagnostics"].get("ambiguous_report_matches", 0),
+        "blank_where_used_rows": field_rollup_result["diagnostics"].get("blank_where_used_rows", 0),
+        "multi_report_field_rows": field_rollup_result["diagnostics"].get("multi_report_field_rows", 0),
+        "unmatched_where_used_reports": field_rollup_result["diagnostics"].get("unmatched_where_used_reports", 0),
         "reports_with_duplicate_field_keys": field_rollup_result["diagnostics"].get("reports_with_duplicate_field_keys", 0),
         "field_join_match_rate": (
             round(100.0 * matched_count / total_reports, 1) if total_reports else 0.0

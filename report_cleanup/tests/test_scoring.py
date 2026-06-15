@@ -49,6 +49,18 @@ def test_last_run_over_1y_gives_10(cfg):
     assert usage(base(last_run_date=TODAY - pd.Timedelta(days=400), times_run=50), cfg) == 10
 
 
+# ---- Effective last-run governs recency when present ----------------------
+def test_usage_uses_effective_last_run_when_present(cfg):
+    # Comprehensive last run is blank (+25) but the effective date is recent -> 0.
+    r = base(last_run_date=pd.NaT, effective_last_run_date=TODAY, times_run=50)
+    assert usage(r, cfg) == 0
+
+
+def test_usage_effective_blank_scores_null_even_if_comprehensive_set(cfg):
+    r = base(last_run_date=TODAY, effective_last_run_date=pd.NaT, times_run=50)
+    assert usage(r, cfg) == 25
+
+
 # ---- Number of Times Run tiers --------------------------------------------
 def test_times_run_zero_gives_10(cfg):
     assert usage(base(times_run=0), cfg) == 10

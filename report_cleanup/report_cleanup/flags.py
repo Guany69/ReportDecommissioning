@@ -56,6 +56,10 @@ def generate_data_quality_flags(report: dict, cfg=None) -> list[str]:
         flags.append("Missing Report Tag")
     if is_null(report.get("data_source")):
         flags.append("Missing Data Source")
+    if report.get("runs_newer_than_comprehensive"):
+        flags.append("Comprehensive Last Run Date was older than the latest execution in Runs.")
+    if report.get("invalid_run_timestamps"):
+        flags.append("Runs export contained invalid execution timestamps (excluded from recurrence).")
     return flags
 
 

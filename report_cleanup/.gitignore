@@ -10,6 +10,10 @@ output/
 
 # Raw data exports (treat as sensitive)
 *.csv
+# ...except the intentional, clearly-fake sample inputs used by the README/tests.
+!sample_data/metadata.csv
+!sample_data/execution.csv
+!sample_data/fields.csv
 
 # ── Python runtime ─────────────────────────────────────────────────────────────
 __pycache__/

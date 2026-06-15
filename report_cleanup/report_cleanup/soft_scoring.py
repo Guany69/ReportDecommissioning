@@ -74,20 +74,26 @@ def calculate_usage_risk(report: dict, today, cfg) -> tuple[int, list[Reason]]:
     reasons: list[Reason] = []
     usage = 0
 
-    last_run = report.get("last_run_date")
+    # Recency uses the EFFECTIVE last-run date (max of Comprehensive's date and the
+    # latest execution seen in the six-month Runs export). Unit tests that pass only
+    # last_run_date keep working via the fallback.
+    if "effective_last_run_date" in report:
+        last_run = report.get("effective_last_run_date")
+    else:
+        last_run = report.get("last_run_date")
     run_days = _days_since(last_run, today)
     if is_null(last_run):
         usage += u["last_run_null"]
-        reasons.append(Reason("usage", "Last Run Date is null", u["last_run_null"]))
+        reasons.append(Reason("usage", "Effective Last Run Date is blank", u["last_run_null"]))
     elif run_days is not None and run_days > s["days"]["year3"]:
         usage += u["last_run_over_3y"]
-        reasons.append(Reason("usage", "Last Run Date older than 3 years", u["last_run_over_3y"]))
+        reasons.append(Reason("usage", "Effective Last Run Date older than 3 years", u["last_run_over_3y"]))
     elif run_days is not None and run_days > s["days"]["year2"]:
         usage += u["last_run_over_2y"]
-        reasons.append(Reason("usage", "Last Run Date older than 2 years", u["last_run_over_2y"]))
+        reasons.append(Reason("usage", "Effective Last Run Date older than 2 years", u["last_run_over_2y"]))
     elif run_days is not None and run_days > s["days"]["year1"]:
         usage += u["last_run_over_1y"]
-        reasons.append(Reason("usage", "Last Run Date older than 1 year", u["last_run_over_1y"]))
+        reasons.append(Reason("usage", "Effective Last Run Date older than 1 year", u["last_run_over_1y"]))
 
     # Missing/blank run count is treated as 0 (no safer numeric convention exists).
     tr = report.get("times_run")

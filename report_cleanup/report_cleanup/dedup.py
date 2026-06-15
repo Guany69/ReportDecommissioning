@@ -53,16 +53,18 @@ def _eq(a, b) -> bool:
 
 
 # ---- name similarity ------------------------------------------------------
-def normalize_report_name(name, name_noise=None) -> str:
-    """Normalized report name (lowercase, de-noised, punctuation stripped)."""
+def normalize_name_for_similarity(name, name_noise=None) -> str:
+    """De-noised report name (lowercase, version/junk tokens stripped) used ONLY
+    for fuzzy duplicate name-similarity — never for the exact Comprehensive<->Runs
+    join (see clean.normalize_report_name for that)."""
     return normalize_name(name, name_noise or [])
 
 
 def calculate_name_similarity(name_a, name_b, name_noise=None) -> float:
     """Report-name similarity as a 0..100 percentage."""
     return float(fuzz.token_sort_ratio(
-        normalize_report_name(name_a, name_noise),
-        normalize_report_name(name_b, name_noise),
+        normalize_name_for_similarity(name_a, name_noise),
+        normalize_name_for_similarity(name_b, name_noise),
     ))
 
 
@@ -88,16 +90,30 @@ def candidate_similarity_score(a: dict, b: dict, cfg) -> float:
 
 
 def should_compare_report_fields(report_a: dict, report_b: dict, cfg) -> bool:
-    """Stage-1 gate: only similar-enough reports earn a Report Fields comparison."""
+    """Stage-1 gate: a pair earns a deeper comparison when ANY candidate condition
+    holds — at least one shared field, at least one shared business object, the
+    same data source, or sufficient name similarity. This widens beyond name
+    similarity so a smaller report fully contained in a differently-named larger
+    report is still evaluated (spec requirement)."""
     d = cfg.dedup
+
+    # Field / business-object / data-source evidence (cheap set checks first).
+    fa = report_a.get("report_fields_set") or set()
+    fb = report_b.get("report_fields_set") or set()
+    if fa and fb and (fa & fb):
+        return True
+    boa = report_a.get("business_objects_set") or set()
+    bob = report_b.get("business_objects_set") or set()
+    if boa and bob and (boa & bob):
+        return True
+    if _eq(report_a.get("data_source"), report_b.get("data_source")):
+        return True
+
     name_noise = cfg.clean["name_noise"]
     name_sim = calculate_name_similarity(report_a.get("report_name"), report_b.get("report_name"), name_noise)
-
     if name_sim >= d["name_similarity_strong"]:
         return True
     if name_sim >= d["name_similarity_moderate"]:
-        if _eq(report_a.get("data_source"), report_b.get("data_source")):
-            return True
         if _eq(report_a.get("category"), report_b.get("category")) and \
            _eq(report_a.get("report_tag"), report_b.get("report_tag")):
             return True
@@ -141,6 +157,46 @@ def _is_edge(sim, cont, d) -> bool:
     return False
 
 
+# ---- candidate generation (inverted indexes) ------------------------------
+def generate_candidate_pairs(records: list[dict], cfg) -> set[tuple[int, int]]:
+    """Return candidate index pairs (i<j) via inverted indexes, near-linear over
+    thousands of reports.
+
+    Indexes: name-prefix, data-source, field-ID, business-object. Two reports
+    that co-occur in ANY index become a candidate. Over-broad blocks (a field or
+    data source shared by more than ``dedup.max_block_size`` reports) are skipped
+    as non-discriminative — genuinely-similar reports still co-occur in narrower
+    blocks (rarer shared fields, name prefix, etc.).
+    """
+    d = cfg.dedup
+    name_noise = cfg.clean["name_noise"]
+    plen = d["block_prefix_len"]
+    max_block = d.get("max_block_size", 400)
+
+    blocks: dict[str, list[int]] = {}
+    for i, r in enumerate(records):
+        nm = normalize_name_for_similarity(r.get("report_name"), name_noise)
+        if nm:
+            blocks.setdefault("pfx:" + nm[:plen], []).append(i)
+        ds = text(r.get("data_source")).lower()
+        if ds:
+            blocks.setdefault("src:" + ds, []).append(i)
+        for fid in (r.get("report_fields_set") or set()):
+            blocks.setdefault("fld:" + str(fid), []).append(i)
+        for bo in (r.get("business_objects_set") or set()):
+            blocks.setdefault("bo:" + str(bo), []).append(i)
+
+    pairs: set[tuple[int, int]] = set()
+    for key, idxs in blocks.items():
+        if len(idxs) < 2 or len(idxs) > max_block:
+            continue
+        for a in range(len(idxs)):
+            for b in range(a + 1, len(idxs)):
+                i, j = idxs[a], idxs[b]
+                pairs.add((i, j) if i < j else (j, i))
+    return pairs
+
+
 # ---- driver ---------------------------------------------------------------
 def detect_duplicates(
     records: list[dict], cfg
@@ -155,7 +211,6 @@ def detect_duplicates(
                             CLASSIFICATION_META_ONLY and send to manual review.
     """
     d = cfg.dedup
-    name_noise = cfg.clean["name_noise"]
     n = len(records)
     uf = _UF(n)
 
@@ -165,46 +220,25 @@ def detect_duplicates(
         if "report_fields_set" not in r:
             r["report_fields_set"] = set()
 
-    # Blocking: name-prefix and data-source blocks keep Stage 1 near-linear.
-    blocks: dict[str, list[int]] = {}
-    plen = d["block_prefix_len"]
-    for i, r in enumerate(records):
-        nm = normalize_report_name(r.get("report_name"), name_noise)
-        if nm:
-            blocks.setdefault("pfx:" + nm[:plen], []).append(i)
-        ds = text(r.get("data_source")).lower()
-        if ds:
-            blocks.setdefault("src:" + ds, []).append(i)
-
-    seen: set[tuple[int, int]] = set()
     meta_only_pairs: list[tuple[int, int]] = []
 
-    for idxs in blocks.values():
-        if len(idxs) < 2:
+    for i, j in generate_candidate_pairs(records, cfg):
+        ra, rb = records[i], records[j]
+        if not should_compare_report_fields(ra, rb, cfg):
             continue
-        for a in range(len(idxs)):
-            for b in range(a + 1, len(idxs)):
-                i, j = idxs[a], idxs[b]
-                pk = (i, j) if i < j else (j, i)
-                if pk in seen:
-                    continue
-                seen.add(pk)
-                ra, rb = records[i], records[j]
-                if not should_compare_report_fields(ra, rb, cfg):
-                    continue
 
-                fa = ra.get("report_fields_set") or set()
-                fb = rb.get("report_fields_set") or set()
+        fa = ra.get("report_fields_set") or set()
+        fb = rb.get("report_fields_set") or set()
 
-                if not fa or not fb:
-                    # Stage 1 passed but field evidence is absent — cannot confirm.
-                    meta_only_pairs.append((ra["report_uid"], rb["report_uid"]))
-                    continue
+        if not fa or not fb:
+            # Stage 1 passed but field evidence is absent — cannot confirm.
+            meta_only_pairs.append((ra["report_uid"], rb["report_uid"]))
+            continue
 
-                sim = calculate_field_similarity(fa, fb)
-                cont = calculate_field_containment(fa, fb)
-                if _is_edge(sim, cont, d):
-                    uf.union(i, j)
+        sim = calculate_field_similarity(fa, fb)
+        cont = calculate_field_containment(fa, fb)
+        if _is_edge(sim, cont, d):
+            uf.union(i, j)
 
     # Collect clusters of size >= 2.
     clusters: dict[int, list[int]] = {}

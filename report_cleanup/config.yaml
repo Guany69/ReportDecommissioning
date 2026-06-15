@@ -1,0 +1,166 @@
+# ============================================================================
+# Report Decommissioning & Consolidation System — single source of truth.
+# The engine reads ONLY from this file, so business users can retune weights,
+# thresholds, and bands without touching Python.
+# ============================================================================
+
+# ---- Run behaviour -------------------------------------------------------
+run:
+  keep_history: false          # false = single active run (truncate-and-load)
+  db_path: "output/report_cleanup.db"
+  excel_dir: "output"
+
+# ---- Column auto-mapping --------------------------------------------------
+# canonical_key -> list of accepted header aliases (compared after normalizing
+# to lowercase + single spaces). Exact alias wins; then containment.
+aliases:
+  # ---- Table 1: metadata ----
+  report_name:    ["custom report", "custom report report name", "report name", "name", "report title", "report"]
+
+  report_tag:     ["report tag", "tag", "tags"]
+  category:       ["category"]
+  landing_page:   ["worklet landing pages", "worklet landing page", "landing page", "landing pages"]
+  owner:          ["owner"]
+  created_by:     ["created by", "author"]
+  description:    ["description", "desc", "notes"]
+  created_date:   ["created date", "created", "date created"]
+  times_run:      ["number of times", "number of times run", "times run", "run count", "executions", "number of runs"]
+  last_updated:   ["last updated date", "last updated", "modified", "last modified"]
+  last_run_date:  ["last run date", "last run", "last executed"]
+  last_run_by:    ["last run by", "run by"]
+  data_source:    ["data source", "datasource", "source", "dataset"]
+  report_type:    ["report type", "type"]
+  worklet:        ["worklet", "is worklet"]
+  chart_type:     ["chart type", "chart"]
+  shared:         ["shared", "is shared", "shared status"]
+  report_prompts: ["report prompts", "prompts", "report prompt"]
+  areas_used:     ["areas where used", "areas used", "used in", "area where used"]
+  report_fields:  ["report fields", "fields", "field list", "columns", "column list"]
+  owner_active:   ["owner active", "owner status", "active", "is active", "owner state"]
+  # ---- Table 2: execution / request ----
+  t2_report_name:  ["custom report", "report name", "name"]
+  t2_report_type:  ["report type", "type"]
+  t2_report_owner: ["report owner", "owner"]
+  t2_start_date:   ["start date", "execution date", "run date"]
+  t2_requested_by: ["requested by name", "requested by", "requester"]
+  t2_requested_id: ["requested by employee id", "employee id", "requester id", "requested by id"]
+  t2_exec_mode:    ["execution mode", "mode"]
+  t2_exec_type:    ["execution type", "exec type"]
+  # ---- Table 3: field export / data dictionary / where-used ----
+  t3_report_name:              ["report name", "custom report", "custom report name", "where used report", "report"]
+  t3_report_id:                ["report id", "custom report id", "report reference id"]
+  t3_where_used:               ["where_used", "where used", "used in", "usage"]
+  t3_business_object:          ["business object", "bo", "primary business object"]
+  t3_field_name:               ["field name", "report field", "field"]
+  t3_description:              ["description", "field description"]
+  t3_report_field_type:        ["report field type", "field type"]
+  t3_related_business_object:  ["related business object name", "related business object", "related bo"]
+  t3_built_in_prompts:         ["built-in prompts", "built in prompts", "builtin prompts"]
+  t3_domain:                   ["domain"]
+  t3_categories:               ["categories", "category"]
+  t3_authorized_usage:         ["authorized usage", "usage authorization"]
+
+# ---- Cleaning -------------------------------------------------------------
+clean:
+  null_tokens: ["", "-", "--", "n/a", "na", "null", "none", "nan", "nat", "(blank)", "."]
+  truthy:      ["yes", "y", "true", "1", "t"]
+  falsy:       ["no", "n", "false", "0", "f"]
+  # Tokens stripped from names before matching (junk / version noise).
+  name_noise:  ["copy", "final", "v1", "v2", "v3", "old", "new", "temp", "draft", "backup", "report", "the", "a", "of"]
+
+# ---- Risk scoring weights & thresholds (0..60, rubric verbatim) -----------
+# Risk answers "how cleanup-worthy is this report?" — derived ONLY from direct
+# report fields. Execution-table presence no longer influences the score.
+scoring:
+  usage_cap: 45
+  days:
+    year1: 365
+    year2: 730
+    year3: 1095
+  usage:
+    last_run_null: 25             # Last Run Date is null
+    last_run_over_3y: 25
+    last_run_over_2y: 20
+    last_run_over_1y: 10
+    times_run_zero: 10
+    times_run_1_3: 7
+    times_run_4_10: 3
+  age:
+    last_updated_over_3y: 10
+    last_updated_over_2y: 7
+    last_updated_null: 5
+  context:
+    areas_used_null: 6
+    landing_page_null: 5
+    not_shared: 4
+
+# ---- Score bands (inclusive max, after clamp 0..60) -----------------------
+# Recommendations only — nothing is ever auto-deleted.
+bands:
+  - {max: 14, label: "Keep"}
+  - {max: 29, label: "Low Priority Review"}
+  - {max: 44, label: "Consolidation Candidate"}
+  - {max: 60, label: "Decommission Review"}
+
+# ---- Ownership / data-quality FLAGS (no score weight) ---------------------
+flags:
+  use_owner_inactive_heuristic: false   # if true, infer inactive owner from keywords
+  inactive_keywords: ["inactive", "terminated", "former", "do not use", "disabled"]
+  # Values (case-insensitive) on an owner_active/owner_status column that mean inactive.
+  inactive_status_values: ["no", "n", "false", "0", "inactive", "terminated", "disabled"]
+
+# ---- Duplicate detection (two-stage) --------------------------------------
+# Stage 1: cheap metadata/name gate decides whether a pair is even a candidate.
+# Stage 2: only candidates get their Report Fields compared (Jaccard + containment).
+dedup:
+  block_prefix_len: 4                 # name-prefix block size (keeps it near-linear)
+  name_similarity_strong: 75          # Stage-1 condition 1
+  name_similarity_moderate: 60        # Stage-1 conditions 2 & 3
+  candidate_score_threshold: 70       # alt Stage-1 gate on candidate_similarity_score
+  candidate_weights:                  # candidate_similarity_score components (sum=100)
+    name: 50
+    data_source: 20
+    category: 10
+    report_tag: 10
+    report_type: 5
+    worklet: 5
+  field_similarity:                   # Stage-2 Jaccard thresholds (percent)
+    nearly_identical: 90
+    strong_duplicate: 75
+    similar_review: 50
+  field_containment:                  # Stage-2 containment thresholds (percent)
+    contained: 95
+    strong_consolidation: 80
+  # A pair becomes a grouping edge at/above either of these.
+  group_min_field_similarity: 50
+  group_min_field_containment: 80
+  # Report-field name aliases (extend freely): variant -> canonical field name.
+  field_aliases:
+    worker id: employee id
+    employee identifier: employee id
+    emp id: employee id
+    sup org: supervisory organization
+    supervisory org: supervisory organization
+    cost centre: cost center
+
+# ---- Field export (table 3) behaviour ------------------------------------
+fields:
+  enabled: true
+  prefer_report_id: true                  # report_id key beats report_name when both present
+  allow_where_used_parsing: true          # parse Where_Used column for report names
+  allow_comma_split_in_where_used: false  # comma is ambiguous in report names; off by default
+  where_used_separator_mode: standard     # newline / semicolon / pipe / bullet characters
+  where_used_requires_report_prefix: false
+  field_key_parts:                        # components used to build a stable field identifier
+    - business_object
+    - field_name
+    - related_business_object
+    - report_field_type
+  catalog_only_behavior: warn_and_continue    # "catalog_only" export → warn, continue without field dedup
+  missing_field_export_behavior: warn_and_continue  # no table3 → warn, continue without field dedup
+
+# ---- Duplicate detection (field-confirmed vs metadata-only) --------------
+duplicates:
+  field_jaccard_threshold: 50             # mirrors dedup.group_min_field_similarity
+  field_containment_threshold: 80         # mirrors dedup.group_min_field_containment
+  metadata_only_duplicate_behavior: manual_review_only  # pairs with no fields go to manual review

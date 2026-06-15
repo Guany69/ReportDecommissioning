@@ -1,0 +1,52 @@
+# Root .gitignore for the Report Decommissioning project.
+# Mirrors report_cleanup/.gitignore so generated/sensitive files are never
+# committed regardless of where `git init` is run.
+
+# ── Generated outputs (may contain sensitive HR data) ─────────────────────────
+output/
+*.db
+*.sqlite
+*.sqlite3
+
+# Excel / spreadsheet outputs and raw data exports (treat all as sensitive)
+*.xlsx
+*.xls
+*.csv
+
+# ── Python runtime ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# ── Virtual environments ────────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── OS / editor artefacts ──────────────────────────────────────────────────────
+.DS_Store
+__MACOSX/
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# ── Environment / secrets ──────────────────────────────────────────────────────
+.env
+.env.*
+secrets.yaml
+secrets.yml
+
+# ── Temp upload staging ────────────────────────────────────────────────────────
+tmp/
+temp/
+
+# Allow the intentional, clearly-fake sample inputs to be committed if desired.
+!report_cleanup/sample_data/metadata.csv
+!report_cleanup/sample_data/execution.csv

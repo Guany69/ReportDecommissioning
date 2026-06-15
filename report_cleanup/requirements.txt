@@ -1,0 +1,10 @@
+pandas>=2.0
+openpyxl>=3.1
+rapidfuzz>=3.0
+streamlit>=1.30
+pyyaml>=6.0
+flask>=2.3
+flask-cors>=4.0
+# xlrd is only needed to read legacy .xls files. Newer xlrd dropped .xls support,
+# so it is pinned. Install separately if you must read .xls:  pip install "xlrd==1.2.0"
+# sqlite3 is part of the Python standard library — nothing to install.

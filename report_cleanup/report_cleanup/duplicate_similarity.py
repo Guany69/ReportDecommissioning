@@ -141,6 +141,9 @@ def compute_duplicate_matches(records: list[dict], cfg) -> None:
         r["duplicate_matches"] = []          # all qualified matches (highest first)
         r["duplicate_reason_trail"] = []
 
+    by_uid = {r["report_uid"]: r for r in records}
+    max_matches = cfg.duplicate_thresholds.get("max_matches_per_report", 50)
+
     for i, j in generate_candidate_pairs(records, cfg):
         a, b = records[i], records[j]
         sim = compute_duplicate_similarity(a, b, cfg)
@@ -158,7 +161,7 @@ def compute_duplicate_matches(records: list[dict], cfg) -> None:
 
     for r in records:
         matches = sorted(r["duplicate_matches"], key=lambda m: m["similarity"], reverse=True)
-        r["duplicate_matches"] = matches
+        r["duplicate_matches"] = matches[:max_matches]   # bound memory on huge clusters
         if matches:
             best = matches[0]
             r["potential_duplicate"] = True
@@ -167,8 +170,7 @@ def compute_duplicate_matches(records: list[dict], cfg) -> None:
             r["duplicate_relationship"] = best["relationship"]
             r["field_jaccard_similarity"] = best["field_jaccard_similarity"]
             r["smaller_report_containment"] = best["smaller_report_containment"]
-            other_uid = best["other_uid"]
-            other = next((x for x in records if x["report_uid"] == other_uid), None)
+            other = by_uid.get(best["other_uid"])   # O(1) lookup, not O(n)
             sim = compute_duplicate_similarity(r, other, cfg) if other else None
             r["duplicate_reason_trail"] = sim.reasons if sim else []
 

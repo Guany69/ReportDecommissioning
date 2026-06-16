@@ -1,10 +1,29 @@
 """Orchestrates the full flow: ingest -> ... -> Excel + SQLite."""
 from __future__ import annotations
 
+import os
+import sys
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+
+_PROFILE = os.environ.get("REPORT_CLEANUP_PROFILE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@contextmanager
+def _stage(name: str):
+    """Print a stage timing line when REPORT_CLEANUP_PROFILE is set — turns a
+    'stuck somewhere' run into a visible per-stage progress log."""
+    if not _PROFILE:
+        yield
+        return
+    print(f"[profile] {name} ...", file=sys.stderr, flush=True)
+    t = time.perf_counter()
+    yield
+    print(f"[profile] {name} done in {time.perf_counter() - t:.1f}s", file=sys.stderr, flush=True)
 
 from . import db, schema
 from .clean import clean_table
@@ -52,9 +71,10 @@ def run_pipeline(
     started = datetime.now()
 
     # 1. INGEST
-    t1_raw = read_any(table1_path)
-    t2_raw = read_any(table2_path) if table2_path else pd.DataFrame()
-    t3_raw = read_any(table3_fields_path) if table3_fields_path else pd.DataFrame()
+    with _stage("ingest files"):
+        t1_raw = read_any(table1_path)
+        t2_raw = read_any(table2_path) if table2_path else pd.DataFrame()
+        t3_raw = read_any(table3_fields_path) if table3_fields_path else pd.DataFrame()
 
     # 2. NORMALIZE COLUMNS (auto-map)
     t1_map = schema.auto_map(list(t1_raw.columns), cfg.aliases, schema.TABLE1_FIELDS)
@@ -81,28 +101,32 @@ def run_pipeline(
           if t3_map else pd.DataFrame())
 
     # 5. BUILD FIELD ROLLUP (table3 -> per-report field sets)
-    if len(t3) and field_mode != FIELD_EXPORT_MODE_MISSING:
-        field_rollup_result = build_report_field_rollup(t3, cfg)
-    else:
-        field_rollup_result = {"rollup": {}, "diagnostics": {}, "unmatched_rows": [], "individual_rows": []}
+    with _stage(f"field rollup ({len(t3)} field rows)"):
+        if len(t3) and field_mode != FIELD_EXPORT_MODE_MISSING:
+            field_rollup_result = build_report_field_rollup(t3, cfg)
+        else:
+            field_rollup_result = {"rollup": {}, "diagnostics": {}, "unmatched_rows": [], "individual_rows": []}
 
     # 6-7. EXEC ROLLUP + JOIN
-    name_noise = cfg.clean["name_noise"]
-    rollup = build_exec_rollup(t2, name_noise)
-    records, diag = join_reports(t1, rollup, name_noise)
-    records = derive_effective_last_run(records)
-    by_uid = {r["report_uid"]: r for r in records}
+    with _stage(f"exec rollup + join ({len(t2)} run rows, {len(t1)} reports)"):
+        name_noise = cfg.clean["name_noise"]
+        rollup = build_exec_rollup(t2, name_noise)
+        records, diag = join_reports(t1, rollup, name_noise)
+        records = derive_effective_last_run(records)
+        by_uid = {r["report_uid"]: r for r in records}
 
     # 7b. RECURRENCE — inferred from Runs execution timestamps only.
-    for r in records:
-        rr = detect_recurrence(r.get("runs_start_timestamps", []), cfg).as_dict()
-        r["recurrence"] = rr
-        r["recurrence_classification"] = rr["classification"]
-        r["recurrence_cadence"] = rr["cadence"]
-        r["recurrence_match_percentage"] = rr["match_percentage"]
+    with _stage("recurrence detection"):
+        for r in records:
+            rr = detect_recurrence(r.get("runs_start_timestamps", []), cfg).as_dict()
+            r["recurrence"] = rr
+            r["recurrence_classification"] = rr["classification"]
+            r["recurrence_cadence"] = rr["cadence"]
+            r["recurrence_match_percentage"] = rr["match_percentage"]
 
     # 8. ATTACH FIELD SETS — must happen before duplicate detection
-    attach_report_fields(records, field_rollup_result, field_mode, cfg)
+    with _stage("attach field sets"):
+        attach_report_fields(records, field_rollup_result, field_mode, cfg)
 
     # 9-10. SCORING: hard rules -> cleanup risk -> protection credit -> Overall Score.
     # Duplicate evidence is NOT an input here (it only affects wording later).
@@ -158,11 +182,13 @@ def run_pipeline(
         r.update(build_all_flags(r, cfg))
 
     # 12. DUPLICATE DETECTION (two-stage) + KEEPER / per-member dup analysis
-    groups, meta_only_pairs = detect_duplicates(records, cfg)
-    apply_duplicate_analysis(by_uid, groups, cfg)
+    with _stage(f"duplicate detection ({len(records)} reports)"):
+        groups, meta_only_pairs = detect_duplicates(records, cfg)
+        apply_duplicate_analysis(by_uid, groups, cfg)
 
     # 12b. WEIGHTED DUPLICATE SIMILARITY (evidence only — never changes the score).
-    compute_duplicate_matches(records, cfg)
+    with _stage("weighted duplicate similarity"):
+        compute_duplicate_matches(records, cfg)
     group_of = {}
     for g in groups:
         for u in g.members:
@@ -233,18 +259,20 @@ def run_pipeline(
         "warnings": all_warnings,
     }
 
-    conn = db.connect(out_dir / Path(cfg.get("run.db_path", "report_cleanup.db")).name)
-    if not cfg.get("run.keep_history", False):
-        db.reset(conn)
-    run_id = db.create_run(conn, run_meta)
-    db.write_reports(conn, run_id, records)
-    db.write_reasons(conn, run_id, records)
-    db.write_groups(conn, run_id, groups)
-    db.write_field_data(conn, run_id, field_rollup_result, records, cfg)
-    conn.close()
+    with _stage("persist to SQLite"):
+        conn = db.connect(out_dir / Path(cfg.get("run.db_path", "report_cleanup.db")).name)
+        if not cfg.get("run.keep_history", False):
+            db.reset(conn)
+        run_id = db.create_run(conn, run_meta)
+        db.write_reports(conn, run_id, records)
+        db.write_reasons(conn, run_id, records)
+        db.write_groups(conn, run_id, groups)
+        db.write_field_data(conn, run_id, field_rollup_result, records, cfg)
+        conn.close()
 
     # 17. EXPORT
-    xlsx = export_workbook(records, groups, run_meta, out_dir, field_rollup_result)
+    with _stage("export Excel workbook"):
+        xlsx = export_workbook(records, groups, run_meta, out_dir, field_rollup_result)
 
     return {
         "run_id": run_id,

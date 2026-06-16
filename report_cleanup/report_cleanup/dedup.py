@@ -14,11 +14,17 @@ of reports. RapidFuzz (already a dependency) provides name similarity.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from rapidfuzz import fuzz
 
-from .clean import normalize_name, text
+from .clean import is_null, normalize_name, text
 from .report_fields import calculate_field_containment, calculate_field_similarity
+
+
+@lru_cache(maxsize=200_000)
+def _norm_sim_cached(name: str, noise: tuple) -> str:
+    return normalize_name(name, list(noise))
 
 
 @dataclass
@@ -56,8 +62,15 @@ def _eq(a, b) -> bool:
 def normalize_name_for_similarity(name, name_noise=None) -> str:
     """De-noised report name (lowercase, version/junk tokens stripped) used ONLY
     for fuzzy duplicate name-similarity — never for the exact Comprehensive<->Runs
-    join (see clean.normalize_report_name for that)."""
-    return normalize_name(name, name_noise or [])
+    join (see clean.normalize_report_name for that).
+
+    Memoized: the same report name is compared across many candidate pairs, so
+    normalizing it once (per name_noise config) avoids re-running the regex on
+    every pairwise comparison — the dominant cost at thousands of reports.
+    """
+    if is_null(name):
+        return ""
+    return _norm_sim_cached(str(name), tuple(name_noise or []))
 
 
 def calculate_name_similarity(name_a, name_b, name_noise=None) -> float:

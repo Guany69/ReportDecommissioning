@@ -11,12 +11,16 @@ Usage (from the report_cleanup/ directory):
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from collections import Counter
 from pathlib import Path
 
 # Make the project root importable when run as `python scripts/diagnose.py`.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+# Surface per-stage timing so a slow run shows progress instead of looking stuck.
+os.environ.setdefault("REPORT_CLEANUP_PROFILE", "1")
 
 import pandas as pd
 

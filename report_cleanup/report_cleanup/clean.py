@@ -88,14 +88,22 @@ def normalize_text(v, null_tokens) -> object:
     return s if s != "" else np.nan
 
 
+# Invisible characters that survive .strip() and silently break exact joins:
+# zero-width space/non-joiner/joiner and the BOM / zero-width no-break space.
+_INVISIBLE = str.maketrans({"​": None, "‌": None, "‍": None, "﻿": None})
+
+
 def normalize_report_name(value: object) -> str:
     """Exact report-name key for joining Comprehensive <-> Runs and Where_Used.
 
-    Case-insensitive, whitespace-trimmed, internal whitespace collapsed — and
-    NOTHING else. Unlike ``normalize_name`` this is *not* de-noised: it never
-    strips version/junk tokens, so two genuinely different reports can never
-    collapse onto the same key. The two files are guaranteed to carry identical
-    report names, so an exact (non-fuzzy) match is correct here.
+    Case-insensitive, whitespace-trimmed, internal whitespace collapsed, and
+    stripped of zero-width / BOM characters — but NOTHING else. Unlike
+    ``normalize_name`` this is *not* de-noised: it never strips version/junk
+    tokens, so two genuinely different reports can never collapse onto the same
+    key. The two files are guaranteed to carry identical report names, so an
+    exact (non-fuzzy) match is correct here. Stripping invisibles prevents a
+    stray BOM/zero-width space (common in Workday CSV exports) from defeating an
+    otherwise-identical match.
     """
     if value is None:
         return ""
@@ -104,7 +112,8 @@ def normalize_report_name(value: object) -> str:
             return ""
     except (TypeError, ValueError):
         pass
-    return " ".join(str(value).strip().casefold().split())
+    # .split() also folds non-breaking spaces (\xa0) and tabs into single spaces.
+    return " ".join(str(value).translate(_INVISIBLE).strip().casefold().split())
 
 
 def normalize_multiline(v, null_tokens) -> object:

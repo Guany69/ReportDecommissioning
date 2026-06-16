@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd
 
 from report_cleanup import schema
-from report_cleanup.clean import clean_table
+from report_cleanup.clean import clean_table, normalize_report_name
 from report_cleanup.config import load_config
 from report_cleanup.io_readers import read_any
 from report_cleanup.pipeline import run_pipeline
@@ -58,6 +58,32 @@ def main() -> None:
         cov = _coverage(cleaned[k]) if k in cleaned.columns else 0.0
         flag = "  <-- ALL BLANK (collapses the score!)" if (k in cleaned.columns and cov == 0.0) else ""
         print(f"  {k:14} <- {src:28} populated: {cov:5}%{flag}")
+
+    # ---- Runs join diagnosis ------------------------------------------------
+    if args.table2:
+        runs_raw = read_any(args.table2)
+        m2 = schema.auto_map(list(runs_raw.columns), cfg.aliases, schema.TABLE2_FIELDS)
+        print(f"\n=== Runs join ({len(runs_raw)} rows) ===")
+        if "t2_report_name" not in m2:
+            print("  *** Runs file has no mappable 'Report Name' column — no join possible ***")
+        else:
+            comp_keys = {normalize_report_name(v) for v in raw[m1["report_name"]]} - {""}
+            runs_col = m2["t2_report_name"]
+            runs_names = [v for v in runs_raw[runs_col]]
+            runs_keys = {normalize_report_name(v) for v in runs_names} - {""}
+            matched = comp_keys & runs_keys
+            runs_only = sorted(runs_keys - comp_keys)
+            comp_only = sorted(comp_keys - runs_keys)
+            print(f"  Distinct Comprehensive names : {len(comp_keys)}")
+            print(f"  Distinct Runs names          : {len(runs_keys)}")
+            print(f"  Matched names                : {len(matched)}")
+            print(f"  In Runs but NOT Comprehensive: {len(runs_only)}")
+            print(f"  In Comprehensive but no Runs : {len(comp_only)}  (these stay null-effective)")
+            if runs_only:
+                print("  -- sample Runs names that did NOT match a report (check for ID suffixes,")
+                print("     extra punctuation, or invisible characters): --")
+                for k in runs_only[:15]:
+                    print(f"       {k!r}")
 
     print("\n=== Running full pipeline ===")
     res = run_pipeline(args.table1, args.table2, args.t3, args.config, out_dir="diagnose_out")

@@ -133,15 +133,21 @@ def normalize_multiline(v, null_tokens) -> object:
     return s if s != "" else np.nan
 
 
-def normalize_name(v, name_noise) -> str:
+def normalize_name(v, name_noise, keep_digits=False) -> str:
     """Lowercase, strip punctuation, drop noise + version tokens and bare ints.
 
     Used for join keys and duplicate matching so "2019 Annual Performance (Copy)"
     and "Annual Performance v2" collapse toward the same signature.
+
+    ``keep_digits=True`` retains numeric tokens (years/IDs). This is used for the
+    duplicate name-similarity key, where a copy ("Copy of 2017 Year End") must match
+    its original ("2017 Year End") but "2017 Year End" must NOT collapse onto
+    "2018 Year End" — i.e. strip copy/version markers, keep the distinguishing year.
     """
     s = re.sub(r"[^a-z0-9 ]+", " ", text(v).lower())
     noise = set(name_noise)
-    toks = [t for t in s.split() if t and t not in noise and not t.isdigit()]
+    toks = [t for t in s.split()
+            if t and t not in noise and (keep_digits or not t.isdigit())]
     return " ".join(toks).strip()
 
 

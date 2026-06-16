@@ -79,18 +79,49 @@ def test_near_identical_fields_group(cfg):
 
 # ---- Metadata-only pairs (no field sets) ----------------------------------
 def test_meta_only_pair_when_fields_missing(cfg):
-    """Stage-1 passes but both records have empty field sets -> meta_only_pairs, not a group."""
-    a = rec(0, "Active Worker List", fields="")   # no field set
-    b = rec(1, "Active Worker Listing", fields="") # no field set
+    """Moderate name similarity (>=strong gate, <name_match) + empty field sets ->
+    meta_only_pairs, not a group."""
+    a = rec(0, "Annual Performance", fields="")        # name sim ~84 -> not a name edge
+    b = rec(1, "Annual Performance Review", fields="")
     groups, meta_only = detect_duplicates([a, b], cfg)
     assert groups == []
     assert (0, 1) in meta_only or (1, 0) in meta_only
 
 
 def test_one_sided_field_set_goes_to_meta_only(cfg):
-    """One report has fields, the other doesn't -> cannot confirm via fields."""
-    a = rec(0, "Active Worker List", fields="Employee ID, Name, Location")
-    b = rec(1, "Active Worker Listing", fields="")
+    """One report has fields, the other doesn't, names only moderately similar ->
+    cannot confirm; goes to meta_only (not a name-based group)."""
+    a = rec(0, "Annual Performance", fields="Employee ID, Name, Location")
+    b = rec(1, "Annual Performance Review", fields="")
     groups, meta_only = detect_duplicates([a, b], cfg)
     assert groups == []
     assert len(meta_only) == 1
+
+
+def test_name_match_groups_without_shared_fields(cfg):
+    """A strong name match (>= name_match) forms a group even when field IDs don't
+    overlap — the core fix for copies that live in their own Fields-export rows."""
+    a = rec(0, "Active Worker List", fields="aa, bb, cc")
+    b = rec(1, "Active Worker Listing", fields="xx, yy, zz")  # disjoint fields, name ~92
+    groups, meta_only = detect_duplicates([a, b], cfg)
+    assert len(groups) == 1 and set(groups[0].members) == {0, 1}
+    assert meta_only == []
+
+
+def test_copy_of_groups_with_original(cfg):
+    """'Copy of X' groups with 'X' (de-noising strips 'copy'/'of') even with no
+    shared field IDs."""
+    a = rec(0, "Headcount Summary", fields="h1, h2")
+    b = rec(1, "Copy of Headcount Summary", fields="z9")
+    groups, _ = detect_duplicates([a, b], cfg)
+    assert len(groups) == 1 and set(groups[0].members) == {0, 1}
+
+
+def test_year_variants_not_grouped_by_name(cfg):
+    """Year-variant reports must NOT name-match: keeping digits in the similarity
+    key means '2017 Year End' and '2018 Year End' stay distinct instead of both
+    collapsing to 'year end' and scoring a false 100%."""
+    a = rec(0, "2017 Year End", fields="a1, a2")
+    b = rec(1, "2018 Year End", fields="b1, b2")  # disjoint fields, only the year differs
+    groups, _ = detect_duplicates([a, b], cfg)
+    assert groups == []

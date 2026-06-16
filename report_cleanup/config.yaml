@@ -250,3 +250,8 @@ duplicate_thresholds:
   containment_relationship: 95     # smaller-report containment for the subset label
   relationship_min_overall: 80     # overall similarity required alongside containment
   candidate_name_similarity: 50    # low candidate gate used by blocking
+  # De-noised name similarity at/above this flags a duplicate (and forms a group)
+  # on NAME alone — even with no shared fields. De-noising strips copy/old/version
+  # tokens, so "Copy of X" / "(Old) X" / exact repeats all score ~100 here. Jaccard
+  # still characterizes the relationship and picks the keeper.
+  name_match: 90

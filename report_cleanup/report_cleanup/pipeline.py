@@ -12,18 +12,39 @@ import pandas as pd
 
 _PROFILE = os.environ.get("REPORT_CLEANUP_PROFILE", "").strip().lower() in {"1", "true", "yes", "on"}
 
+# Number of stages wrapped with `stage(...)` below — keep in sync so the progress
+# fraction reaches 1.0 at the end.
+_TOTAL_STAGES = 9
 
-@contextmanager
-def _stage(name: str):
-    """Print a stage timing line when REPORT_CLEANUP_PROFILE is set — turns a
-    'stuck somewhere' run into a visible per-stage progress log."""
-    if not _PROFILE:
+
+def _make_stage(progress=None):
+    """Build a stage context manager that (a) prints timing when
+    REPORT_CLEANUP_PROFILE is set and (b) calls an optional progress callback
+    `progress(fraction: float, label: str)` before and after each stage — used by
+    the Streamlit dashboard to drive a progress bar."""
+    state = {"done": 0}
+
+    def _emit(label: str):
+        if progress is None:
+            return
+        try:
+            progress(min(state["done"] / _TOTAL_STAGES, 1.0), label)
+        except Exception:
+            pass  # never let UI progress reporting break the pipeline
+
+    @contextmanager
+    def stage(name: str):
+        _emit(name)
+        if _PROFILE:
+            print(f"[profile] {name} ...", file=sys.stderr, flush=True)
+        t = time.perf_counter()
         yield
-        return
-    print(f"[profile] {name} ...", file=sys.stderr, flush=True)
-    t = time.perf_counter()
-    yield
-    print(f"[profile] {name} done in {time.perf_counter() - t:.1f}s", file=sys.stderr, flush=True)
+        state["done"] += 1
+        if _PROFILE:
+            print(f"[profile] {name} done in {time.perf_counter() - t:.1f}s", file=sys.stderr, flush=True)
+        _emit(name)
+
+    return stage
 
 from . import db, schema
 from .clean import clean_table
@@ -65,13 +86,17 @@ def run_pipeline(
     config_path=None,
     out_dir=None,
     config: Config | None = None,
+    progress=None,
 ) -> dict:
     cfg = config or load_config(config_path)
     out_dir = Path(out_dir) if out_dir else Path(cfg.get("run.excel_dir", "output"))
     started = datetime.now()
+    # Per-stage progress: prints timing under REPORT_CLEANUP_PROFILE and drives an
+    # optional UI callback `progress(fraction, label)`.
+    stage = _make_stage(progress)
 
     # 1. INGEST
-    with _stage("ingest files"):
+    with stage("ingest files"):
         t1_raw = read_any(table1_path)
         t2_raw = read_any(table2_path) if table2_path else pd.DataFrame()
         t3_raw = read_any(table3_fields_path) if table3_fields_path else pd.DataFrame()
@@ -101,14 +126,14 @@ def run_pipeline(
           if t3_map else pd.DataFrame())
 
     # 5. BUILD FIELD ROLLUP (table3 -> per-report field sets)
-    with _stage(f"field rollup ({len(t3)} field rows)"):
+    with stage(f"field rollup ({len(t3)} field rows)"):
         if len(t3) and field_mode != FIELD_EXPORT_MODE_MISSING:
             field_rollup_result = build_report_field_rollup(t3, cfg)
         else:
             field_rollup_result = {"rollup": {}, "diagnostics": {}, "unmatched_rows": [], "individual_rows": []}
 
     # 6-7. EXEC ROLLUP + JOIN
-    with _stage(f"exec rollup + join ({len(t2)} run rows, {len(t1)} reports)"):
+    with stage(f"exec rollup + join ({len(t2)} run rows, {len(t1)} reports)"):
         name_noise = cfg.clean["name_noise"]
         rollup = build_exec_rollup(t2, name_noise)
         records, diag = join_reports(t1, rollup, name_noise)
@@ -116,7 +141,7 @@ def run_pipeline(
         by_uid = {r["report_uid"]: r for r in records}
 
     # 7b. RECURRENCE — inferred from Runs execution timestamps only.
-    with _stage("recurrence detection"):
+    with stage("recurrence detection"):
         for r in records:
             rr = detect_recurrence(r.get("runs_start_timestamps", []), cfg).as_dict()
             r["recurrence"] = rr
@@ -125,7 +150,7 @@ def run_pipeline(
             r["recurrence_match_percentage"] = rr["match_percentage"]
 
     # 8. ATTACH FIELD SETS — must happen before duplicate detection
-    with _stage("attach field sets"):
+    with stage("attach field sets"):
         attach_report_fields(records, field_rollup_result, field_mode, cfg)
 
     # 9-10. SCORING: hard rules -> cleanup risk -> protection credit -> Overall Score.
@@ -182,12 +207,12 @@ def run_pipeline(
         r.update(build_all_flags(r, cfg))
 
     # 12. DUPLICATE DETECTION (two-stage) + KEEPER / per-member dup analysis
-    with _stage(f"duplicate detection ({len(records)} reports)"):
+    with stage(f"duplicate detection ({len(records)} reports)"):
         groups, meta_only_pairs = detect_duplicates(records, cfg)
         apply_duplicate_analysis(by_uid, groups, cfg)
 
     # 12b. WEIGHTED DUPLICATE SIMILARITY (evidence only — never changes the score).
-    with _stage("weighted duplicate similarity"):
+    with stage("weighted duplicate similarity"):
         compute_duplicate_matches(records, cfg)
     group_of = {}
     for g in groups:
@@ -259,7 +284,7 @@ def run_pipeline(
         "warnings": all_warnings,
     }
 
-    with _stage("persist to SQLite"):
+    with stage("persist to SQLite"):
         conn = db.connect(out_dir / Path(cfg.get("run.db_path", "report_cleanup.db")).name)
         if not cfg.get("run.keep_history", False):
             db.reset(conn)
@@ -271,7 +296,7 @@ def run_pipeline(
         conn.close()
 
     # 17. EXPORT
-    with _stage("export Excel workbook"):
+    with stage("export Excel workbook"):
         xlsx = export_workbook(records, groups, run_meta, out_dir, field_rollup_result)
 
     return {

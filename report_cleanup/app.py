@@ -39,8 +39,14 @@ if run_btn and f1 is not None:
     p2 = _save_tmp(f2) if f2 is not None else None
     p3 = _save_tmp(f3) if f3 is not None else None
     try:
-        with st.spinner("Analyzing report catalog..."):
-            res = run_pipeline(p1, p2, p3, out_dir=tempfile.mkdtemp())
+        bar = st.progress(0.0, text="Starting analysis…")
+
+        def _on_progress(fraction: float, label: str) -> None:
+            bar.progress(min(fraction, 1.0), text=f"{label}…")
+
+        res = run_pipeline(p1, p2, p3, out_dir=tempfile.mkdtemp(), progress=_on_progress)
+        bar.progress(1.0, text="Analysis complete")
+        bar.empty()
         st.session_state["res"] = res
     finally:
         # [SECURITY] Always delete temp upload copies, even on failure, so raw

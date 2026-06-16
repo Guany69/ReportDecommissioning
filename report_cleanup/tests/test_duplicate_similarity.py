@@ -67,6 +67,21 @@ def test_missing_components_renormalize_weights(cfg):
     assert sim.overall == 100.0  # all available components agree perfectly
 
 
+def test_low_field_overlap_short_circuits_to_not_flagged(cfg):
+    # Shares 1 of ~19 union fields (jaccard ~5%, containment ~10%); even with a
+    # perfect name/data-source/type match the ceiling stays below 'possible', so the
+    # pair is Not Flagged via the short-circuit. Field numbers are still reported.
+    a = rep(0, "Report A", fields={f"a{i}" for i in range(9)} | {"shared"},
+            data_source="DS", report_type="T")
+    b = rep(1, "Report A", fields={f"b{i}" for i in range(9)} | {"shared"},
+            data_source="DS", report_type="T")
+    sim = compute_duplicate_similarity(a, b, cfg)
+    assert sim.relationship == "Not Flagged"
+    assert sim.potential_duplicate is False
+    assert sim.field_jaccard is not None       # field overlap still surfaced
+    assert sim.components == {}                 # expensive components skipped
+
+
 def test_below_possible_threshold_not_flagged(cfg):
     a = rep(0, "Apples Report", fields={"f1"}, data_source="A", report_type="X")
     b = rep(1, "Oranges Listing", fields={"z9"}, data_source="B", report_type="Y")

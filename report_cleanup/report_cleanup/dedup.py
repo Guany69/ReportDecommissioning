@@ -110,7 +110,10 @@ def should_compare_report_fields(report_a: dict, report_b: dict, cfg) -> bool:
     report is still evaluated (spec requirement)."""
     d = cfg.dedup
 
-    # Field / business-object / data-source evidence (cheap set checks first).
+    # Field / business-object evidence (cheap set checks first). Data source alone
+    # is intentionally NOT a trigger — it is non-discriminative (thousands of reports
+    # share one source) and only contributes as a supporting signal via the blended
+    # candidate score below.
     fa = report_a.get("report_fields_set") or set()
     fb = report_b.get("report_fields_set") or set()
     if fa and fb and (fa & fb):
@@ -118,8 +121,6 @@ def should_compare_report_fields(report_a: dict, report_b: dict, cfg) -> bool:
     boa = report_a.get("business_objects_set") or set()
     bob = report_b.get("business_objects_set") or set()
     if boa and bob and (boa & bob):
-        return True
-    if _eq(report_a.get("data_source"), report_b.get("data_source")):
         return True
 
     name_noise = cfg.clean["name_noise"]
@@ -186,14 +187,14 @@ def generate_candidate_pairs(records: list[dict], cfg) -> set[tuple[int, int]]:
     plen = d["block_prefix_len"]
     max_block = d.get("max_block_size", 400)
 
+    # Blocks: name-prefix, field-ID, business-object. Data source is deliberately
+    # NOT a blocking key — it is non-discriminative (one source spans thousands of
+    # reports) and only acts as a supporting signal in the blended candidate score.
     blocks: dict[str, list[int]] = {}
     for i, r in enumerate(records):
         nm = normalize_name_for_similarity(r.get("report_name"), name_noise)
         if nm:
             blocks.setdefault("pfx:" + nm[:plen], []).append(i)
-        ds = text(r.get("data_source")).lower()
-        if ds:
-            blocks.setdefault("src:" + ds, []).append(i)
         for fid in (r.get("report_fields_set") or set()):
             blocks.setdefault("fld:" + str(fid), []).append(i)
         for bo in (r.get("business_objects_set") or set()):

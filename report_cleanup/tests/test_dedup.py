@@ -35,10 +35,13 @@ def test_compared_when_name_similarity_strong(cfg):
     assert should_compare_report_fields(a, b, cfg) is True
 
 
-def test_compared_when_moderate_name_plus_data_source(cfg):
+def test_moderate_name_plus_data_source_alone_not_compared(cfg):
+    # Tightened: data source is only a SUPPORTING signal now. Moderate name
+    # similarity + a shared data source (but differing category/tag and no shared
+    # fields) is no longer enough on its own to trigger a field comparison.
     a = rec(0, "Worker Roster", data_source="Workers", category="X", report_tag="P")
     b = rec(1, "Worker Headcount Roster", data_source="Workers", category="Y", report_tag="Q")
-    assert should_compare_report_fields(a, b, cfg) is True
+    assert should_compare_report_fields(a, b, cfg) is False
 
 
 def test_compared_when_moderate_name_plus_category_and_tag(cfg):

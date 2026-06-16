@@ -175,15 +175,19 @@ def export_workbook(
     out_dir = secure_mkdir(out_dir)
     path = out_dir / f"report-cleanup-{datetime.now():%Y-%m-%d}.xlsx"
 
-    all_rows = [report_row(r) for r in records]
+    # Build each report's export row ONCE and reuse it across every tab (All Reports,
+    # per-recommendation tiers, Hard Rule, Meta-Similar) — report_row is non-trivial
+    # and was previously recomputed per tab.
+    row_by_uid = {r["report_uid"]: report_row(r) for r in records}
+    all_rows = [row_by_uid[r["report_uid"]] for r in records]
     df_all = pd.DataFrame(all_rows)
     by_uid = {r["report_uid"]: r for r in records}
 
     def band_is(label):
-        return [report_row(r) for r in records
+        return [row_by_uid[r["report_uid"]] for r in records
                 if not r.get("is_hard_rule") and r.get("recommendation") == label]
 
-    hard = [report_row(r) for r in records if r.get("is_hard_rule")]
+    hard = [row_by_uid[r["report_uid"]] for r in records if r.get("is_hard_rule")]
 
     # Duplicate Groups tab (keeper first within each group).
     dup_rows = []
@@ -219,7 +223,7 @@ def export_workbook(
 
     # Metadata Similar – Fields Unavailable tab.
     meta_similar_rows = [
-        report_row(r) for r in records
+        row_by_uid[r["report_uid"]] for r in records
         if r.get("duplicate_classification") == "Metadata Similar - Fields Unavailable"
     ]
 

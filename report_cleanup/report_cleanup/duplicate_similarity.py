@@ -80,6 +80,25 @@ def compute_duplicate_similarity(a: dict, b: dict, cfg) -> DuplicateSimilarity:
     field_jaccard = _set_jaccard(fa, fb)
     smaller_containment = _set_containment(fa, fb)
 
+    # Ceiling short-circuit: when both reports have fields, the field components
+    # carry most of the weight. Using the cheap field numbers we already have, the
+    # best the pair could score (with every remaining component perfect) is bounded.
+    # If that ceiling is below the 'possible' threshold it can never be flagged, so
+    # skip the costly name/BO/prompt/related/auth comparisons. Correctness-preserving.
+    if field_jaccard is not None:
+        total = sum(w.values()) or 1.0
+        non_field_w = total - w.get("field_jaccard", 0) - w.get("smaller_containment", 0)
+        ceiling = (w.get("field_jaccard", 0) * field_jaccard
+                   + w.get("smaller_containment", 0) * smaller_containment
+                   + non_field_w * 100.0) / total
+        if ceiling < th.get("possible", 70):
+            return DuplicateSimilarity(
+                overall=0.0, relationship="Not Flagged", potential_duplicate=False,
+                field_jaccard=round(field_jaccard, 1),
+                smaller_containment=round(smaller_containment, 1),
+                components={}, weights_used={}, reasons=[],
+            )
+
     # value per component (None = unavailable -> renormalized away).
     values: dict[str, float | None] = {
         "field_jaccard": field_jaccard,

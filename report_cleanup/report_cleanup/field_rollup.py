@@ -145,8 +145,9 @@ def build_report_field_rollup(t3: pd.DataFrame, cfg) -> dict:
         "reports_with_duplicate_field_keys": 0,
     }
 
-    for idx, (_, row) in enumerate(t3.iterrows()):
-        row_d = row.to_dict()
+    # to_dict("records") is far faster than iterrows() (no per-row Series) — matters
+    # when the Fields export is large.
+    for idx, row_d in enumerate(t3.to_dict("records")):
         # Stable per-row field ID — never merged with any other row.
         field_id = f"f{idx}"
         field_display = text(row_d.get("t3_field_name", "")) or field_id

@@ -72,9 +72,24 @@ def validate(t1: pd.DataFrame, t2: pd.DataFrame | None, t1_map, t2_map) -> Valid
         vr.warnings.append("Table 2 present but has no mappable 'Custom Report' column — execution join skipped.")
 
     # Scoring-field coverage (warn on missing signals).
-    for fkey in schema.SCORING_FIELDS:
-        if fkey not in t1_map:
-            vr.warnings.append(f"Scoring field '{fkey}' not found in Table 1 — that signal scores as absent.")
+    missing_scoring = [f for f in schema.SCORING_FIELDS if f not in t1_map]
+    for fkey in missing_scoring:
+        vr.warnings.append(f"Scoring field '{fkey}' not found in Table 1 — that signal scores as absent.")
+
+    # If MOST scoring fields are unmapped, the file almost certainly wasn't parsed
+    # into columns correctly (wrong delimiter / encoding / a title row above the
+    # headers). Without this, every report collapses onto the same score.
+    if t1 is not None and len(t1.columns) <= 1:
+        vr.warnings.append(
+            f"Table 1 parsed into only {len(t1.columns)} column — the file may be "
+            "semicolon/tab-delimited or have a title row above the headers. Every report "
+            "will score the same if scoring columns are missing. Re-check the export."
+        )
+    elif len(missing_scoring) >= len(schema.SCORING_FIELDS) // 2:
+        vr.warnings.append(
+            f"{len(missing_scoring)} of {len(schema.SCORING_FIELDS)} scoring columns did not map — "
+            "reports may all score the same. Check the delimiter/encoding and that headers are row 1."
+        )
 
     vr.field_coverage = coverage(t1.rename(columns={v: k for k, v in t1_map.items()}))
     return vr

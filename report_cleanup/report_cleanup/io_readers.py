@@ -5,6 +5,7 @@ guesses (and mangles) IDs, dates, or booleans during ingest.
 """
 from __future__ import annotations
 
+import csv
 import hashlib
 from pathlib import Path
 
@@ -17,11 +18,33 @@ class UnsupportedFormat(Exception):
     pass
 
 
+def _sniff_delimiter(path: Path) -> str:
+    """Detect the CSV delimiter so semicolon/tab/pipe exports parse correctly.
+
+    Workday CSV exports are frequently semicolon- or tab-delimited; read as
+    comma they collapse into a single column and every scoring field reads as
+    null. Sniff a sample (restricted to common delimiters) and fall back to a
+    comma when detection is ambiguous.
+    """
+    with open(path, "r", encoding="utf-8-sig", newline="") as fh:
+        sample = fh.read(16384)
+    if not sample:
+        return ","
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+    except csv.Error:
+        # No clear delimiter (e.g. a genuine single-column file) — default to comma.
+        return ","
+
+
 def read_any(path: str | Path) -> pd.DataFrame:
     path = Path(path)
     ext = path.suffix.lower()
     if ext == ".csv":
-        df = pd.read_csv(path, dtype=str, keep_default_na=False, na_values=[""])
+        # utf-8-sig drops a leading BOM; the sniffed sep handles non-comma exports.
+        sep = _sniff_delimiter(path)
+        df = pd.read_csv(path, dtype=str, keep_default_na=False, na_values=[""],
+                         sep=sep, encoding="utf-8-sig")
     elif ext == ".xlsx":
         df = pd.read_excel(path, sheet_name=0, dtype=str, engine="openpyxl")
     elif ext == ".xls":

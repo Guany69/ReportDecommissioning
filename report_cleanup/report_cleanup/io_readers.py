@@ -23,6 +23,15 @@ from .security import check_table_size
 # Scan at most this many leading rows when hunting for the real header row.
 _HEADER_SCAN_ROWS = 15
 
+# Prefer calamine (Rust) for .xlsx — it is several times faster than openpyxl on
+# the large Fields export and produces byte-identical string output under
+# dtype=str. Fall back to openpyxl when python-calamine isn't installed.
+try:
+    import python_calamine  # noqa: F401  (import is the availability probe)
+    _XLSX_ENGINE = "calamine"
+except ImportError:
+    _XLSX_ENGINE = "openpyxl"
+
 
 class UnsupportedFormat(Exception):
     pass
@@ -115,7 +124,7 @@ def read_any(path: str | Path) -> pd.DataFrame:
         # utf-8-sig drops a leading BOM; the sniffed sep handles non-comma exports.
         raw = _read_csv_ragged(path, _sniff_delimiter(path))
     elif ext == ".xlsx":
-        raw = pd.read_excel(path, sheet_name=0, header=None, dtype=str, engine="openpyxl")
+        raw = pd.read_excel(path, sheet_name=0, header=None, dtype=str, engine=_XLSX_ENGINE)
     elif ext == ".xls":
         try:
             raw = pd.read_excel(path, sheet_name=0, header=None, dtype=str, engine="xlrd")

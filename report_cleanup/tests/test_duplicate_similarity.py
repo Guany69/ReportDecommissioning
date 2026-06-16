@@ -71,9 +71,11 @@ def test_low_field_overlap_short_circuits_to_not_flagged(cfg):
     # Shares 1 of ~19 union fields (jaccard ~5%, containment ~10%); even with a
     # perfect name/data-source/type match the ceiling stays below 'possible', so the
     # pair is Not Flagged via the short-circuit. Field numbers are still reported.
-    a = rep(0, "Report A", fields={f"a{i}" for i in range(9)} | {"shared"},
+    # Dissimilar names so the field short-circuit is what's under test (a strong
+    # name match would flag it regardless).
+    a = rep(0, "Apples Quarterly Dashboard", fields={f"a{i}" for i in range(9)} | {"shared"},
             data_source="DS", report_type="T")
-    b = rep(1, "Report A", fields={f"b{i}" for i in range(9)} | {"shared"},
+    b = rep(1, "Oranges Annual Listing", fields={f"b{i}" for i in range(9)} | {"shared"},
             data_source="DS", report_type="T")
     sim = compute_duplicate_similarity(a, b, cfg)
     assert sim.relationship == "Not Flagged"

@@ -24,7 +24,10 @@ from .report_fields import calculate_field_containment, calculate_field_similari
 
 @lru_cache(maxsize=200_000)
 def _norm_sim_cached(name: str, noise: tuple) -> str:
-    return normalize_name(name, list(noise))
+    # keep_digits=True: years/IDs distinguish reports, so "2017 Year End" and
+    # "2018 Year End" stay separate instead of both collapsing to "year end" and
+    # scoring a false 100% name match.
+    return normalize_name(name, list(noise), keep_digits=True)
 
 
 @dataclass
@@ -234,6 +237,8 @@ def detect_duplicates(
         if "report_fields_set" not in r:
             r["report_fields_set"] = set()
 
+    name_noise = cfg.clean["name_noise"]
+    name_match_th = cfg.duplicate_thresholds.get("name_match", 90)
     meta_only_pairs: list[tuple[int, int]] = []
 
     for i, j in generate_candidate_pairs(records, cfg):
@@ -241,18 +246,25 @@ def detect_duplicates(
         if not should_compare_report_fields(ra, rb, cfg):
             continue
 
+        # A strong de-noised name match (copies / exact repeats / "(Old) X") is
+        # itself enough to group, even when field IDs don't overlap — copies often
+        # have their own separate Fields-export rows.
+        name_edge = calculate_name_similarity(
+            ra.get("report_name"), rb.get("report_name"), name_noise) >= name_match_th
+
         fa = ra.get("report_fields_set") or set()
         fb = rb.get("report_fields_set") or set()
 
-        if not fa or not fb:
-            # Stage 1 passed but field evidence is absent — cannot confirm.
+        if fa and fb:
+            sim = calculate_field_similarity(fa, fb)
+            cont = calculate_field_containment(fa, fb)
+            if name_edge or _is_edge(sim, cont, d):
+                uf.union(i, j)
+        elif name_edge:
+            uf.union(i, j)            # name-based group despite missing field data
+        else:
+            # Stage 1 passed but field evidence is absent and names don't match.
             meta_only_pairs.append((ra["report_uid"], rb["report_uid"]))
-            continue
-
-        sim = calculate_field_similarity(fa, fb)
-        cont = calculate_field_containment(fa, fb)
-        if _is_edge(sim, cont, d):
-            uf.union(i, j)
 
     # Collect clusters of size >= 2.
     clusters: dict[int, list[int]] = {}

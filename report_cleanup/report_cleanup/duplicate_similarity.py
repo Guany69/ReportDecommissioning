@@ -80,17 +80,24 @@ def compute_duplicate_similarity(a: dict, b: dict, cfg) -> DuplicateSimilarity:
     field_jaccard = _set_jaccard(fa, fb)
     smaller_containment = _set_containment(fa, fb)
 
-    # Ceiling short-circuit: when both reports have fields, the field components
-    # carry most of the weight. Using the cheap field numbers we already have, the
-    # best the pair could score (with every remaining component perfect) is bounded.
-    # If that ceiling is below the 'possible' threshold it can never be flagged, so
-    # skip the costly name/BO/prompt/related/auth comparisons. Correctness-preserving.
-    if field_jaccard is not None:
+    # Name similarity (de-noised) is computed up front: it both (a) lets a strong
+    # name match flag a duplicate on its own and (b) tightens the short-circuit.
+    name_sim = calculate_name_similarity(a.get("report_name"), b.get("report_name"), name_noise)
+    name_match = name_sim >= th.get("name_match", 90)
+
+    # Ceiling short-circuit (skipped for name matches, which are always flagged below).
+    # When both reports have fields, the field components carry most of the weight;
+    # using the cheap field numbers + the real name score, the best the pair could
+    # score (every remaining component perfect) is bounded. If that ceiling is below
+    # the 'possible' threshold it can never be flagged, so skip the remaining
+    # BO/prompt/related/auth comparisons. Correctness-preserving.
+    if not name_match and field_jaccard is not None:
         total = sum(w.values()) or 1.0
-        non_field_w = total - w.get("field_jaccard", 0) - w.get("smaller_containment", 0)
+        name_w = w.get("name", 0)
+        other_w = total - w.get("field_jaccard", 0) - w.get("smaller_containment", 0) - name_w
         ceiling = (w.get("field_jaccard", 0) * field_jaccard
                    + w.get("smaller_containment", 0) * smaller_containment
-                   + non_field_w * 100.0) / total
+                   + name_w * name_sim + other_w * 100.0) / total
         if ceiling < th.get("possible", 70):
             return DuplicateSimilarity(
                 overall=0.0, relationship="Not Flagged", potential_duplicate=False,
@@ -105,7 +112,7 @@ def compute_duplicate_similarity(a: dict, b: dict, cfg) -> DuplicateSimilarity:
         "smaller_containment": smaller_containment,
         "business_object": _set_jaccard(a.get("business_objects_set") or set(),
                                         b.get("business_objects_set") or set()),
-        "name": calculate_name_similarity(a.get("report_name"), b.get("report_name"), name_noise),
+        "name": name_sim,
         "built_in_prompts": _set_jaccard(a.get("built_in_prompts_set") or set(),
                                          b.get("built_in_prompts_set") or set()),
         "related_business_object": _set_jaccard(a.get("related_bos_set") or set(),
@@ -123,6 +130,16 @@ def compute_duplicate_similarity(a: dict, b: dict, cfg) -> DuplicateSimilarity:
     overall = round(overall, 1)
 
     relationship, potential = _classify(overall, smaller_containment, th)
+
+    # Name-based duplicate: a very high de-noised name match (e.g. "Copy of X" vs
+    # "X", "(Old) X", or exact repeats) flags the pair EVEN when fields don't overlap
+    # — copies often live in their own Fields-export rows. If field evidence didn't
+    # already produce a stronger verdict, label it a name match and surface the name
+    # score as the headline similarity.
+    if name_match and not potential:
+        potential = True
+        relationship = "Likely Duplicate (Name Match)"
+        overall = max(overall, round(name_sim, 1))
 
     reasons = [Reason("duplicate",
                       f"Weighted duplicate similarity {overall:.1f}% ({relationship})", None)]

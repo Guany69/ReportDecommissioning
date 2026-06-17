@@ -118,10 +118,42 @@ def test_copy_of_groups_with_original(cfg):
 
 
 def test_year_variants_not_grouped_by_name(cfg):
-    """Year-variant reports must NOT name-match: keeping digits in the similarity
-    key means '2017 Year End' and '2018 Year End' stay distinct instead of both
-    collapsing to 'year end' and scoring a false 100%."""
-    a = rec(0, "2017 Year End", fields="a1, a2")
-    b = rec(1, "2018 Year End", fields="b1, b2")  # disjoint fields, only the year differs
+    """Year-variant reports must NOT name-match. The shared 'Annual Review' prefix
+    makes them genuine candidates (blocking does NOT save us), so this exercises the
+    real guard: the differing numeric tokens reject the match even though the char
+    ratio is >90."""
+    a = rec(0, "Annual Review 2017", fields="a1, a2")
+    b = rec(1, "Annual Review 2018", fields="b1, b2")  # disjoint fields, only the year differs
     groups, _ = detect_duplicates([a, b], cfg)
     assert groups == []
+
+
+def test_quarter_variants_not_grouped_by_name(cfg):
+    """Fiscal/quarter numerics differing also blocks a name match (FY17 vs FY18)."""
+    a = rec(0, "FY17 Headcount Detail", fields="a1, a2")
+    b = rec(1, "FY18 Headcount Detail", fields="b1, b2")
+    groups, _ = detect_duplicates([a, b], cfg)
+    assert groups == []
+
+
+def test_blank_and_noise_only_names_never_name_match(cfg):
+    """Empty, missing, and noise-only names de-noise to "" (RapidFuzz scores two
+    empty strings 100). They must NEVER form a name-based group, even when they
+    share a field ID — otherwise every nameless report collapses into one cluster."""
+    # One shared field id makes the pair a candidate, but balanced 5-field sets keep
+    # Jaccard (~11%) and containment (20%) well below an edge — so the ONLY thing
+    # that could group them is a name match, which must not fire on empty names.
+    for na, nb in [("", ""), (None, None), ("Copy", "Copy"), ("Report", "Report")]:
+        a = rec(0, na, fields="f1, f2, f3, f4, f5")
+        b = rec(1, nb, fields="f1, g2, g3, g4, g5")
+        groups, _ = detect_duplicates([a, b], cfg)
+        assert groups == [], f"{na!r} vs {nb!r} should not group on name"
+
+
+def test_same_year_copy_still_groups(cfg):
+    """The digit guard must not break legitimate copies: a copy keeps the original's
+    year, so identical numeric tokens still allow the match."""
+    a = rec(0, "2017 Year End Summary", fields="a1, a2")
+    b = rec(1, "Copy of 2017 Year End Summary", fields="z9")  # disjoint fields, same year
+    groups, _ = detect_duplicates([a, b], cfg)
+    assert len(groups) == 1 and set(groups[0].members) == {0, 1}

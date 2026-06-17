@@ -16,7 +16,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .clean import text
-from .dedup import calculate_name_similarity, generate_candidate_pairs
+from rapidfuzz import fuzz
+
+from .dedup import (generate_candidate_pairs, is_strong_name_match,
+                    normalize_name_for_similarity)
 from .soft_scoring import Reason
 
 # Component -> human label for the reason trail.
@@ -82,22 +85,32 @@ def compute_duplicate_similarity(a: dict, b: dict, cfg) -> DuplicateSimilarity:
 
     # Name similarity (de-noised) is computed up front: it both (a) lets a strong
     # name match flag a duplicate on its own and (b) tightens the short-circuit.
-    name_sim = calculate_name_similarity(a.get("report_name"), b.get("report_name"), name_noise)
-    name_match = name_sim >= th.get("name_match", 90)
+    # name_sim is the headline SCORE; name_match is the guarded VERDICT (empty and
+    # year/ID-variant names score high but must not flag — see is_strong_name_match).
+    # When either name de-noises to empty the component is UNAVAILABLE (None) — two
+    # empty names score 100 in RapidFuzz, which would otherwise leak a false 100%
+    # into the blend and label nameless reports "Nearly Identical".
+    na = normalize_name_for_similarity(a.get("report_name"), name_noise)
+    nb = normalize_name_for_similarity(b.get("report_name"), name_noise)
+    name_available = bool(na and nb)
+    name_sim = float(fuzz.token_sort_ratio(na, nb)) if name_available else None
+    name_match = is_strong_name_match(
+        a.get("report_name"), b.get("report_name"), name_noise, th.get("name_match", 90))
 
     # Ceiling short-circuit (skipped for name matches, which are always flagged below).
     # When both reports have fields, the field components carry most of the weight;
     # using the cheap field numbers + the real name score, the best the pair could
     # score (every remaining component perfect) is bounded. If that ceiling is below
     # the 'possible' threshold it can never be flagged, so skip the remaining
-    # BO/prompt/related/auth comparisons. Correctness-preserving.
+    # BO/prompt/related/auth comparisons. Correctness-preserving. An unavailable name
+    # folds into other_w (counted at its 100 max) so the ceiling stays an upper bound.
     if not name_match and field_jaccard is not None:
         total = sum(w.values()) or 1.0
-        name_w = w.get("name", 0)
+        name_w = w.get("name", 0) if name_available else 0
         other_w = total - w.get("field_jaccard", 0) - w.get("smaller_containment", 0) - name_w
         ceiling = (w.get("field_jaccard", 0) * field_jaccard
                    + w.get("smaller_containment", 0) * smaller_containment
-                   + name_w * name_sim + other_w * 100.0) / total
+                   + name_w * (name_sim or 0.0) + other_w * 100.0) / total
         if ceiling < th.get("possible", 70):
             return DuplicateSimilarity(
                 overall=0.0, relationship="Not Flagged", potential_duplicate=False,

@@ -102,3 +102,39 @@ def test_compute_matches_stamps_best_and_all(cfg):
     assert a["potential_duplicate_of"] == "Worker Report"
     assert a["duplicate_similarity"] >= 90
     assert c["potential_duplicate"] is False
+
+
+# ---- name-match guard regressions -----------------------------------------
+def test_empty_names_are_unavailable_not_a_match(cfg):
+    """Two empty/noise-only names de-noise to "" (RapidFuzz scores them 100). The
+    name component must be UNAVAILABLE, not a false 100% — otherwise nameless
+    reports get labelled Nearly Identical."""
+    # Differing data_source/report_type so only the (empty) name is in question —
+    # otherwise those default-equal components would flag the pair on their own.
+    for nm in ("", "Copy", "Report"):
+        a = rep(0, nm, fields=set(), data_source="A", report_type="X")
+        b = rep(1, nm, fields=set(), data_source="B", report_type="Y")
+        sim = compute_duplicate_similarity(a, b, cfg)
+        assert "name" not in sim.components, f"name should be unavailable for {nm!r}"
+        assert sim.potential_duplicate is False
+        assert sim.relationship == "Not Flagged"
+
+
+def test_year_variant_names_not_flagged(cfg):
+    """Year/ID variants score >90 on the char ratio but name different reports —
+    the differing numeric tokens must prevent a name-match verdict."""
+    a = rep(0, "Annual Review 2017", fields={"a1", "a2"})
+    b = rep(1, "Annual Review 2018", fields={"b1", "b2"})
+    sim = compute_duplicate_similarity(a, b, cfg)
+    assert sim.relationship != "Likely Duplicate (Name Match)"
+    assert sim.potential_duplicate is False
+
+
+def test_same_year_copy_is_name_match(cfg):
+    """A copy keeps the original's year, so the guard still lets it flag on name
+    alone even with no shared fields."""
+    a = rep(0, "2017 Year End Summary", fields={"a1"})
+    b = rep(1, "Copy of 2017 Year End Summary", fields={"z9"})
+    sim = compute_duplicate_similarity(a, b, cfg)
+    assert sim.relationship == "Likely Duplicate (Name Match)"
+    assert sim.potential_duplicate is True

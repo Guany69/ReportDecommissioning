@@ -13,6 +13,7 @@ of reports. RapidFuzz (already a dependency) provides name similarity.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
 
@@ -21,12 +22,16 @@ from rapidfuzz import fuzz
 from .clean import is_null, normalize_name, text
 from .report_fields import calculate_field_containment, calculate_field_similarity
 
+# Runs of digits inside a de-noised name (years, IDs, quarter/fiscal numbers).
+_DIGIT_RUN = re.compile(r"\d+")
+
 
 @lru_cache(maxsize=200_000)
 def _norm_sim_cached(name: str, noise: tuple) -> str:
-    # keep_digits=True: years/IDs distinguish reports, so "2017 Year End" and
-    # "2018 Year End" stay separate instead of both collapsing to "year end" and
-    # scoring a false 100% name match.
+    # keep_digits=True so the numeric tokens survive for is_strong_name_match to
+    # compare. (The fuzzy ratio alone can't tell year variants apart — a one-digit
+    # difference in a long shared name still scores >90 — so the digit-set check in
+    # is_strong_name_match, not this normalization, is what actually separates them.)
     return normalize_name(name, list(noise), keep_digits=True)
 
 
@@ -82,6 +87,34 @@ def calculate_name_similarity(name_a, name_b, name_noise=None) -> float:
         normalize_name_for_similarity(name_a, name_noise),
         normalize_name_for_similarity(name_b, name_noise),
     ))
+
+
+def is_strong_name_match(name_a, name_b, name_noise, threshold) -> bool:
+    """True when two report names are a strong de-noised match SAFE to group on.
+
+    Single source of truth for "is this a name-based duplicate?" — used by both
+    detect_duplicates and compute_duplicate_similarity. A raw similarity score is
+    not safe on its own; this guards the two ways it lies:
+
+      * Empty / noise-only / missing names. Both de-noise to "" and RapidFuzz
+        scores two empty strings 100, which would cluster every nameless or
+        "Copy"/"Report"-only report into one bogus group. Either side empty -> no
+        match.
+      * Year / ID variants. "Annual Review 2017" vs "...2018" share enough text to
+        score >90 on a character-based ratio even though they are DIFFERENT
+        reports. The de-noised names keep their digits, so when the numeric-token
+        sets differ we reject the match outright rather than trust the score.
+
+    A copy ("Copy of 2017 Year End" -> "2017 year end") keeps the same digits as
+    its original, so legitimate copies still match.
+    """
+    na = normalize_name_for_similarity(name_a, name_noise)
+    nb = normalize_name_for_similarity(name_b, name_noise)
+    if not na or not nb:
+        return False
+    if set(_DIGIT_RUN.findall(na)) != set(_DIGIT_RUN.findall(nb)):
+        return False
+    return float(fuzz.token_sort_ratio(na, nb)) >= threshold
 
 
 # ---- Stage 1: candidate matching ------------------------------------------
@@ -248,9 +281,10 @@ def detect_duplicates(
 
         # A strong de-noised name match (copies / exact repeats / "(Old) X") is
         # itself enough to group, even when field IDs don't overlap — copies often
-        # have their own separate Fields-export rows.
-        name_edge = calculate_name_similarity(
-            ra.get("report_name"), rb.get("report_name"), name_noise) >= name_match_th
+        # have their own separate Fields-export rows. is_strong_name_match guards
+        # against empty/noise-only names and year/ID variants (see its docstring).
+        name_edge = is_strong_name_match(
+            ra.get("report_name"), rb.get("report_name"), name_noise, name_match_th)
 
         fa = ra.get("report_fields_set") or set()
         fb = rb.get("report_fields_set") or set()

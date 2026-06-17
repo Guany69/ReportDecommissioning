@@ -139,10 +139,11 @@ def normalize_name(v, name_noise, keep_digits=False) -> str:
     Used for join keys and duplicate matching so "2019 Annual Performance (Copy)"
     and "Annual Performance v2" collapse toward the same signature.
 
-    ``keep_digits=True`` retains numeric tokens (years/IDs). This is used for the
-    duplicate name-similarity key, where a copy ("Copy of 2017 Year End") must match
-    its original ("2017 Year End") but "2017 Year End" must NOT collapse onto
-    "2018 Year End" — i.e. strip copy/version markers, keep the distinguishing year.
+    ``keep_digits=True`` retains numeric tokens (years/IDs) so the de-noised name
+    still carries its distinguishing year. NOTE: keeping the digits is necessary but
+    NOT sufficient to tell year variants apart — a char-based similarity ratio still
+    scores "...2017" vs "...2018" >90. The actual separation is done by comparing the
+    numeric tokens in dedup.is_strong_name_match; this flag only preserves them.
     """
     s = re.sub(r"[^a-z0-9 ]+", " ", text(v).lower())
     noise = set(name_noise)

@@ -397,10 +397,43 @@ def export_decommission_summary(records: list[dict], out_dir: str | Path) -> Pat
 
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
         _prep(df).to_excel(xw, sheet_name="Decommission Summary", index=False)
-        for ws in xw.book.worksheets:
-            _autoformat(ws)
+        ws = xw.book["Decommission Summary"]
+        _autoformat(ws)
+        _style_summary_sheet(ws)
 
     return path
+
+
+# Fixed column widths (chars) for the summary; everything else stays readable.
+_SUMMARY_WIDTHS = {
+    "Report Name": 40, "Overall Score": 12, "Recommendation": 34,
+    "Reason Trail": 70, "Duplicate Status": 16, "Duplicate Group ID": 16,
+}
+
+
+def _style_summary_sheet(ws):
+    """Presentation polish for the decommission summary so it reads cleanly in Excel:
+    a colored header band, sensible fixed column widths, centered scores/ids, and a
+    WRAPPED Reason Trail so long trails are fully visible instead of clipped."""
+    header_fill = PatternFill("solid", fgColor="1F4E78")     # dark blue band
+    header_font = Font(bold=True, color="FFFFFF")
+    headers = [c.value for c in ws[1]]
+
+    for c in ws[1]:
+        c.fill = header_fill
+        c.font = header_font
+        c.alignment = Alignment(vertical="center", horizontal="left")
+
+    for idx, name in enumerate(headers, start=1):
+        letter = get_column_letter(idx)
+        if name in _SUMMARY_WIDTHS:
+            ws.column_dimensions[letter].width = _SUMMARY_WIDTHS[name]
+        if name == "Reason Trail":
+            for (cell,) in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+        elif name in ("Overall Score", "Duplicate Group ID", "Duplicate Status"):
+            for (cell,) in ws.iter_rows(min_row=2, min_col=idx, max_col=idx):
+                cell.alignment = Alignment(horizontal="center", vertical="top")
 
 
 def _prep(df: pd.DataFrame) -> pd.DataFrame:

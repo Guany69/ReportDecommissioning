@@ -51,7 +51,7 @@ from .clean import clean_table
 from .config import Config, load_config
 from .dedup import CLASSIFICATION_META_ONLY, detect_duplicates
 from .exec_rollup import build_exec_rollup
-from .export_excel import export_workbook
+from .export_excel import export_decommission_summary, export_workbook
 from .field_rollup import (
     FIELD_EXPORT_MODE_MISSING,
     attach_report_fields,
@@ -298,6 +298,7 @@ def run_pipeline(
     # 17. EXPORT
     with stage("export Excel workbook"):
         xlsx = export_workbook(records, groups, run_meta, out_dir, field_rollup_result)
+        summary_xlsx = export_decommission_summary(records, out_dir)
 
     return {
         "run_id": run_id,
@@ -307,5 +308,6 @@ def run_pipeline(
         "field_diag": field_diag,
         "warnings": all_warnings,
         "xlsx": xlsx,
+        "summary_xlsx": summary_xlsx,
         "db": str(out_dir / Path(cfg.get("run.db_path", "report_cleanup.db")).name),
     }

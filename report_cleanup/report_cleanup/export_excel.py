@@ -152,6 +152,22 @@ def report_row(r: dict) -> dict:
     }
 
 
+# Column order for the focused decommission summary export.
+SUMMARY_COLUMNS = ["Report Name", "Overall Score", "Recommendation", "Reason Trail"]
+
+
+def decommission_summary_row(r: dict) -> dict:
+    """One row for the focused decommission summary export: the original report
+    name, the headline Overall Decommissioning Score, the recommendation, and the
+    reason trail that explains the score. Nothing else."""
+    return {
+        "Report Name": text(r.get("report_name")),
+        "Overall Score": _int(r.get("overall_score")),
+        "Recommendation": text(r.get("recommendation")),
+        "Reason Trail": _reason_str(r.get("all_reasons", [])),
+    }
+
+
 def _autoformat(ws):
     ws.freeze_panes = "A2"
     if ws.max_row >= 1 and ws.max_column >= 1:
@@ -296,6 +312,34 @@ def export_workbook(
         for ws in xw.book.worksheets:
             _autoformat(ws)
         _highlight_keepers(xw.book["Duplicate Groups"])
+
+    return path
+
+
+def export_decommission_summary(records: list[dict], out_dir: str | Path) -> Path:
+    """Write a focused single-sheet workbook with exactly four columns: original
+    report name, Overall Decommissioning Score, recommendation, and reason trail.
+
+    A stakeholder-facing summary distinct from the full export_workbook diagnostics.
+    Rows are ordered by Overall Score descending (strongest decommission candidates
+    first); ties break on report name. Reuses the same presentation-layer security
+    (sensitive masking + Excel-injection sanitizing) as every other sheet.
+    """
+    # [SECURITY] Owner-only perms on the output dir (holds HR data workbooks).
+    out_dir = secure_mkdir(out_dir)
+    path = out_dir / f"decommission-summary-{datetime.now():%Y-%m-%d}.xlsx"
+
+    ordered = sorted(
+        records,
+        key=lambda r: (-(r.get("overall_score") or 0), text(r.get("report_name")).lower()),
+    )
+    # Force column order even when records is empty (header-only sheet).
+    df = pd.DataFrame([decommission_summary_row(r) for r in ordered], columns=SUMMARY_COLUMNS)
+
+    with pd.ExcelWriter(path, engine="openpyxl") as xw:
+        _prep(df).to_excel(xw, sheet_name="Decommission Summary", index=False)
+        for ws in xw.book.worksheets:
+            _autoformat(ws)
 
     return path
 

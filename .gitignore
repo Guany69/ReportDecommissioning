@@ -51,3 +51,6 @@ temp/
 !report_cleanup/sample_data/metadata.csv
 !report_cleanup/sample_data/execution.csv
 !report_cleanup/sample_data/fields.csv
+
+# Local Claude Code settings (per-machine, not shared)
+.claude/

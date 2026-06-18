@@ -8,6 +8,7 @@ from report_cleanup.export_excel import (
     SUMMARY_COLUMNS,
     assign_duplicate_group_ids,
     decommission_summary_row,
+    duplicate_identification,
     export_decommission_summary,
 )
 from report_cleanup.soft_scoring import Reason
@@ -87,6 +88,19 @@ def test_transitive_matches_form_one_group():
 def test_nonduplicates_excluded_from_id_assignment():
     recs = [_record(0, "Lonely")]  # no dup_group_id
     assert assign_duplicate_group_ids(recs) == {}
+
+
+def test_duplicate_identification_shared_helper():
+    """The helper the app and the export both consume: per-uid status + DG id."""
+    recs = [_record(0, "Bravo", dup_group_id="DUP-0001"),
+            _record(1, "Alpha", dup_group_id="DUP-0001"),
+            _record(2, "Solo")]
+    ident = duplicate_identification(recs)
+    assert ident[0][0] == "Duplicate" and ident[0][1] == "DG-001"
+    assert ident[1][0] == "Duplicate" and ident[1][1] == "DG-001"
+    assert ident[2][0] == "Not a Duplicate" and ident[2][1] == ""
+    # Non-duplicate sorts after duplicates (primary key 1 vs 0).
+    assert ident[2][2][0] == 1 and ident[0][2][0] == 0
 
 
 # ---- exported file: columns, blanks, ordering ------------------------------

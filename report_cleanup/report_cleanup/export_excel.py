@@ -201,6 +201,27 @@ def assign_duplicate_group_ids(records: list[dict]) -> dict[str, str]:
     return {gid: f"DG-{i:03d}" for i, (gid, _names) in enumerate(ordered, start=1)}
 
 
+def duplicate_identification(records: list[dict]) -> dict[int, tuple[str, str, tuple]]:
+    """Per-report duplicate identification, keyed by report_uid:
+    ``(Duplicate Status, Duplicate Group ID, sort_key)``.
+
+    Single source of truth shared by the Excel summary export AND the Streamlit app,
+    so the on-screen table, its CSV download, and the summary workbook show identical
+    values and ordering. The sort_key places duplicate groups first (by DG id, then
+    normalized name) and non-duplicates last (by normalized name); it is for ordering
+    only and is never displayed.
+    """
+    dg_by_group = assign_duplicate_group_ids(records)
+    out: dict[int, tuple[str, str, tuple]] = {}
+    for r in records:
+        gid = r.get("dup_group_id")
+        dg = dg_by_group.get(gid, "") if gid else ""
+        status = DUPLICATE_STATUS if dg else NOT_DUPLICATE_STATUS
+        norm = normalize_report_name(r.get("report_name"))
+        out[r["report_uid"]] = (status, dg, (0 if dg else 1, dg, norm))
+    return out
+
+
 def _autoformat(ws):
     ws.freeze_panes = "A2"
     if ws.max_row >= 1 and ws.max_column >= 1:
@@ -363,19 +384,14 @@ def export_decommission_summary(records: list[dict], out_dir: str | Path) -> Pat
     out_dir = secure_mkdir(out_dir)
     path = out_dir / f"decommission-summary-{datetime.now():%Y-%m-%d}.xlsx"
 
-    dg_by_group = assign_duplicate_group_ids(records)
-
-    def keyed_row(r: dict):
-        gid = r.get("dup_group_id")
-        dg = dg_by_group.get(gid, "") if gid else ""
-        status = DUPLICATE_STATUS if dg else NOT_DUPLICATE_STATUS
-        norm_name = normalize_report_name(r.get("report_name"))
-        # Sort: duplicates first (0) ordered by DG id then name; non-dups (1) by name.
-        # The sort key is local only — it is never written to the sheet.
-        sort_key = (0 if dg else 1, dg, norm_name)
-        return sort_key, decommission_summary_row(r, status, dg)
-
-    keyed = sorted((keyed_row(r) for r in records), key=lambda kr: kr[0])
+    ident = duplicate_identification(records)
+    # Sort key (local only — never written) groups duplicates into contiguous blocks.
+    keyed = sorted(
+        ((ident[r["report_uid"]][2],
+          decommission_summary_row(r, ident[r["report_uid"]][0], ident[r["report_uid"]][1]))
+         for r in records),
+        key=lambda kr: kr[0],
+    )
     # Force column order even when records is empty (header-only sheet).
     df = pd.DataFrame([row for _key, row in keyed], columns=SUMMARY_COLUMNS)
 

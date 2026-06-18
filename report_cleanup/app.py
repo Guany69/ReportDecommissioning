@@ -11,7 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from report_cleanup.config import load_config
-from report_cleanup.export_excel import report_row
+from report_cleanup.export_excel import duplicate_identification, report_row
 from report_cleanup.pipeline import run_pipeline
 from report_cleanup.security import mask_df, sensitive_mode_enabled
 
@@ -66,6 +66,23 @@ records = res["records"]
 groups = res["groups"]
 df = pd.DataFrame([report_row(r) for r in records])
 
+# Duplicate identification (status + public DG-id) and grouped ordering — same source
+# of truth as the decommission summary export, so the on-screen table, its CSV
+# download, and the downloadable summary workbook all show identical values/order.
+DUP_STATUS_COL = "Duplicate Status"
+DUP_GID_COL = "Duplicate Group ID"
+_ident = duplicate_identification(records)
+df[DUP_STATUS_COL] = [_ident[r["report_uid"]][0] for r in records]
+df[DUP_GID_COL] = [_ident[r["report_uid"]][1] for r in records]
+# Drop the redundant internal group id (DUP-0001) display in favor of the public
+# DG-001 column, so only one group-id column is shown.
+df = df.drop(columns=["duplicate_group_id"], errors="ignore")
+# Grouped order: duplicate groups first (as contiguous blocks), then non-duplicates.
+_rank = {r["report_uid"]: i
+         for i, r in enumerate(sorted(records, key=lambda r: _ident[r["report_uid"]][2]))}
+df["_rank"] = [_rank[r["report_uid"]] for r in records]
+df = df.sort_values("_rank").drop(columns="_rank").reset_index(drop=True)
+
 # KPI row.
 hard = sum(1 for r in records if r.get("is_hard_rule"))
 band = lambda b: sum(1 for r in records if not r.get("is_hard_rule") and r.get("recommendation") == b)
@@ -92,6 +109,10 @@ with st.sidebar:
     with open(res["xlsx"], "rb") as fh:
         st.download_button("Download Excel workbook", fh.read(),
                            file_name=Path(res["xlsx"]).name)
+    if res.get("summary_xlsx"):
+        with open(res["summary_xlsx"], "rb") as fh:
+            st.download_button("Download decommission summary", fh.read(),
+                               file_name=Path(res["summary_xlsx"]).name)
 
 fdf = df.copy()
 if fr:
@@ -115,11 +136,15 @@ with t1:
     SCORE_COL = "Overall Score"
     SUGG_COL = "recommendation"   # the Overall-Score recommendation label
     TRAIL_COL = "Reason Trail"
-    detail_cols = [c for c in show.columns if c not in (NAME_COL, TRAIL_COL)]
+    detail_cols = [c for c in show.columns
+                   if c not in (NAME_COL, TRAIL_COL, DUP_STATUS_COL, DUP_GID_COL)]
 
-    # Table shows report name, overall score, the recommendation, and the reason
-    # trail; all other fields live behind the dropdown so the page isn't a column dump.
-    summary_cols = [c for c in (NAME_COL, SCORE_COL, SUGG_COL, TRAIL_COL) if c in show.columns]
+    # Table shows report name, overall score, the recommendation, the reason trail,
+    # and the duplicate status + group id; all other fields live behind the dropdown
+    # so the page isn't a column dump. Rows are already in grouped order, so the
+    # table (and its CSV download) presents duplicate groups as contiguous blocks.
+    summary_cols = [c for c in (NAME_COL, SCORE_COL, SUGG_COL, TRAIL_COL,
+                                DUP_STATUS_COL, DUP_GID_COL) if c in show.columns]
     summary = show[summary_cols].rename(columns={SUGG_COL: "Recommendation"})
     st.dataframe(summary, use_container_width=True, hide_index=True)
 

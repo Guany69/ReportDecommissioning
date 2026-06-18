@@ -15,7 +15,7 @@ import pandas as pd
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .clean import text
+from .clean import normalize_report_name, text
 from .security import (
     mask_df,
     sanitize_df_for_excel,
@@ -153,19 +153,52 @@ def report_row(r: dict) -> dict:
 
 
 # Column order for the focused decommission summary export.
-SUMMARY_COLUMNS = ["Report Name", "Overall Score", "Recommendation", "Reason Trail"]
+SUMMARY_COLUMNS = ["Report Name", "Overall Score", "Recommendation", "Reason Trail",
+                   "Duplicate Status", "Duplicate Group ID"]
+DUPLICATE_STATUS = "Duplicate"
+NOT_DUPLICATE_STATUS = "Not a Duplicate"
 
 
-def decommission_summary_row(r: dict) -> dict:
+def decommission_summary_row(r: dict, duplicate_status: str = NOT_DUPLICATE_STATUS,
+                             duplicate_group_id: str = "") -> dict:
     """One row for the focused decommission summary export: the original report
-    name, the headline Overall Decommissioning Score, the recommendation, and the
-    reason trail that explains the score. Nothing else."""
+    name, the headline Overall Decommissioning Score, the recommendation, the
+    reason trail that explains the score, and the duplicate status + group id.
+
+    duplicate_status / duplicate_group_id are supplied by export_decommission_summary
+    (computed across all records); a non-member's group id is the empty string, never
+    None/NaN, so it exports as a blank cell.
+    """
     return {
         "Report Name": text(r.get("report_name")),
         "Overall Score": _int(r.get("overall_score")),
         "Recommendation": text(r.get("recommendation")),
         "Reason Trail": _reason_str(r.get("all_reasons", [])),
+        "Duplicate Status": duplicate_status,
+        "Duplicate Group ID": duplicate_group_id,
     }
+
+
+def assign_duplicate_group_ids(records: list[dict]) -> dict[str, str]:
+    """Map each detected duplicate group to a deterministic public id (DG-001, ...).
+
+    A report "belongs to a duplicate group" when the existing duplicate-detection
+    logic stamped it with a ``dup_group_id`` (recommend.apply_duplicate_analysis) —
+    that id already encodes the transitive connected component, so A-B + B-C land in
+    one group here automatically. We renumber those internal ids into DG-00N by
+    sorting the groups on the normalized alphabetical name of their first
+    (alphabetically-earliest) report, so the same input always yields the same ids.
+    """
+    members_by_group: dict[str, list[str]] = {}
+    for r in records:
+        gid = r.get("dup_group_id")
+        if gid:
+            members_by_group.setdefault(gid, []).append(
+                normalize_report_name(r.get("report_name")))
+    # Order groups by their alphabetically-first member name; tie-break on the
+    # internal id (itself deterministic) so numbering is stable.
+    ordered = sorted(members_by_group.items(), key=lambda kv: (min(kv[1]), kv[0]))
+    return {gid: f"DG-{i:03d}" for i, (gid, _names) in enumerate(ordered, start=1)}
 
 
 def _autoformat(ws):
@@ -321,20 +354,30 @@ def export_decommission_summary(records: list[dict], out_dir: str | Path) -> Pat
     report name, Overall Decommissioning Score, recommendation, and reason trail.
 
     A stakeholder-facing summary distinct from the full export_workbook diagnostics.
-    Rows are ordered by Overall Score descending (strongest decommission candidates
-    first); ties break on report name. Reuses the same presentation-layer security
+    Rows are grouped for review: every duplicate group appears as a contiguous block
+    (DG-001, DG-002, ...), members sorted by normalized name within the block, then
+    all non-duplicates by normalized name. Reuses the same presentation-layer security
     (sensitive masking + Excel-injection sanitizing) as every other sheet.
     """
     # [SECURITY] Owner-only perms on the output dir (holds HR data workbooks).
     out_dir = secure_mkdir(out_dir)
     path = out_dir / f"decommission-summary-{datetime.now():%Y-%m-%d}.xlsx"
 
-    ordered = sorted(
-        records,
-        key=lambda r: (-(r.get("overall_score") or 0), text(r.get("report_name")).lower()),
-    )
+    dg_by_group = assign_duplicate_group_ids(records)
+
+    def keyed_row(r: dict):
+        gid = r.get("dup_group_id")
+        dg = dg_by_group.get(gid, "") if gid else ""
+        status = DUPLICATE_STATUS if dg else NOT_DUPLICATE_STATUS
+        norm_name = normalize_report_name(r.get("report_name"))
+        # Sort: duplicates first (0) ordered by DG id then name; non-dups (1) by name.
+        # The sort key is local only — it is never written to the sheet.
+        sort_key = (0 if dg else 1, dg, norm_name)
+        return sort_key, decommission_summary_row(r, status, dg)
+
+    keyed = sorted((keyed_row(r) for r in records), key=lambda kr: kr[0])
     # Force column order even when records is empty (header-only sheet).
-    df = pd.DataFrame([decommission_summary_row(r) for r in ordered], columns=SUMMARY_COLUMNS)
+    df = pd.DataFrame([row for _key, row in keyed], columns=SUMMARY_COLUMNS)
 
     with pd.ExcelWriter(path, engine="openpyxl") as xw:
         _prep(df).to_excel(xw, sheet_name="Decommission Summary", index=False)

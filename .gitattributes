@@ -1,0 +1,12 @@
+# [SECURITY] Keep development-only metadata out of distribution archives.
+# `git archive` (the recommended way to produce a release ZIP/tarball) honors
+# `export-ignore`, so these never end up in a shared package even though the ZIP
+# in the security review did contain .git/.venv/.DS_Store. Never hand-zip the
+# working directory; use:  git archive --format=zip -o release.zip HEAD
+.gitattributes export-ignore
+.gitignore export-ignore
+.github/ export-ignore
+tests/ export-ignore
+scripts/ export-ignore
+.pytest_cache/ export-ignore
+.DS_Store export-ignore

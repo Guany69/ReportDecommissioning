@@ -7,7 +7,8 @@ from pathlib import Path
 import pandas as pd
 
 from .clean import normalize_report_name, text
-from .security import secure_mkdir
+from .security import (SENSITIVE_RECORD_KEYS, mask_value, secure_mkdir,
+                       sensitive_mode_enabled)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -174,9 +175,21 @@ REPORT_COLS = [
 
 
 def write_reports(conn, run_id: int, records: list[dict]) -> None:
+    # [SECURITY] When sensitive mode is on, mask person-identifying fields
+    # before they are persisted so the SQLite DB is not a plaintext bypass of
+    # the preview/Excel masking. Display columns (e.g. report names, free-text
+    # descriptions) can still embed identifiers — masking is name-list based,
+    # not a guarantee — so the DB directory is also locked to 0o700 (connect()).
+    mask = sensitive_mode_enabled()
     rows = []
     for r in records:
-        rows.append([run_id] + [_fmt(r.get(c)) for c in REPORT_COLS])
+        row = [run_id]
+        for c in REPORT_COLS:
+            v = r.get(c)
+            if mask and c in SENSITIVE_RECORD_KEYS:
+                v = mask_value(v)
+            row.append(_fmt(v))
+        rows.append(row)
     placeholders = ",".join(["?"] * (len(REPORT_COLS) + 1))
     conn.executemany(
         f"INSERT INTO reports (run_id, {', '.join(REPORT_COLS)}) VALUES ({placeholders})",

@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .security import check_table_size
+from .security import check_table_size, validate_upload
 
 # Scan at most this many leading rows when hunting for the real header row.
 _HEADER_SCAN_ROWS = 15
@@ -119,6 +119,10 @@ def _read_csv_ragged(path: Path, sep: str) -> pd.DataFrame:
 def read_any(path: str | Path) -> pd.DataFrame:
     path = Path(path)
     ext = path.suffix.lower()
+    # [SECURITY] Validate raw bytes (size, magic-byte signature, xlsx zip-bomb)
+    # BEFORE handing the file to any parser, so a renamed/oversized/weaponized
+    # upload is rejected up front rather than after it inflates in memory.
+    validate_upload(path, ext)
     # Read with NO header first so we can locate the real header row ourselves.
     if ext == ".csv":
         # utf-8-sig drops a leading BOM; the sniffed sep handles non-comma exports.
@@ -130,7 +134,7 @@ def read_any(path: str | Path) -> pd.DataFrame:
             raw = pd.read_excel(path, sheet_name=0, header=None, dtype=str, engine="xlrd")
         except ImportError as exc:  # xlrd not installed
             raise UnsupportedFormat(
-                ".xls requires xlrd==1.2.0 (pip install 'xlrd==1.2.0'), "
+                ".xls requires xlrd>=2.0.1 (pip install 'xlrd>=2.0.1'), "
                 "or re-save the file as .xlsx."
             ) from exc
     else:

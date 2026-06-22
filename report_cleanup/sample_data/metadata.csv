@@ -1,7 +1,0 @@
-Custom Report,Report Tag(s),Category,Worklet Landing Pages,Owner,Created by,Description,Created Date,Available Usage,Number of Times Executed,Last Updated Date,Last Run By,Last Run Date,Data Source,Report Type,Worklet,Chart Type,Shared,Landing Page,Report Prompts,Area Where Used
-Active Employee Report,HR,Workers,Worker Dashboard,Alice Smith,Alice Smith,All active employees,2023-12-28,All,240,2026-05-06,Bob Lee,2026-05-26,All Workers,Advanced,No,Matrix,Yes,Worker Dashboard,Location,HR; Payroll; Compliance
-Active Employee Report Copy,HR,Workers,,Carol White,Carol White,Copy of active employee report,2022-11-23,All,2,2022-11-23,Carol White,2022-11-23,All Workers,Advanced,No,Matrix,No,,,
-Headcount Summary DNU,HR,Workers,,Dan Brown,Dan Brown,Deprecated,2022-05-07,All,0,2022-08-15,Dan Brown,2022-08-15,All Workers,Advanced,No,Matrix,No,,,
-Onboarding Tile,HR,Workers,,Eve Black,Eve Black,Tile with no placement,2024-04-06,All,5,2024-04-06,Eve Black,2024-07-15,All Workers,Tile,Yes,Tile,No,,,
-Old Compensation Report,Comp,Compensation,,Frank Green,Frank Green,Legacy comp report,2021-07-11,All,0,2022-05-07,Frank Green,2022-05-07,Compensation,Advanced,No,Matrix,No,,Salary,
-Quarterly Finance Report,Finance,Financials,,Grace Hall,Grace Hall,Finance summary,2024-07-15,All,30,2026-02-15,Grace Hall,2026-03-12,Financials,Advanced,No,Matrix,Yes,,Period,Finance

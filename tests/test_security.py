@@ -98,11 +98,17 @@ def test_mask_record_masks_keys():
 # Pipeline: no absolute/temp source paths persisted (item 8)
 # --------------------------------------------------------------------------
 def test_pipeline_stores_basename_not_full_path(tmp_path):
-    here = os.path.dirname(__file__)
-    root = os.path.dirname(here)
-    meta = os.path.join(root, "sample_data", "metadata.csv")
-    execf = os.path.join(root, "sample_data", "execution.csv")
-    res = run_pipeline(meta, execf, out_dir=str(tmp_path / "out"))
+    meta = tmp_path / "metadata.csv"
+    meta.write_text(
+        "Custom Report,Number of Times Executed,Last Run Date\n"
+        "Active Employee Report,240,2026-05-26\n"
+    )
+    execf = tmp_path / "execution.csv"
+    execf.write_text(
+        "Report Name,Start Date and Time,Requested By\n"
+        "Active Employee Report,2026-05-26 09:00:00,Bob Lee\n"
+    )
+    res = run_pipeline(str(meta), str(execf), out_dir=str(tmp_path / "out"))
 
     conn = sqlite3.connect(res["db"])
     t1_file, t2_file = conn.execute("SELECT table1_file, table2_file FROM runs").fetchone()

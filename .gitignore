@@ -1,6 +1,4 @@
 # Root .gitignore for the Report Decommissioning project.
-# Mirrors report_cleanup/.gitignore so generated/sensitive files are never
-# committed regardless of where `git init` is run.
 
 # ── Generated outputs (may contain sensitive HR data) ─────────────────────────
 output/
@@ -46,11 +44,6 @@ secrets.yml
 # ── Temp upload staging ────────────────────────────────────────────────────────
 tmp/
 temp/
-
-# Allow the intentional, clearly-fake sample inputs to be committed if desired.
-!report_cleanup/sample_data/metadata.csv
-!report_cleanup/sample_data/execution.csv
-!report_cleanup/sample_data/fields.csv
 
 # Local Claude Code settings (per-machine, not shared)
 .claude/

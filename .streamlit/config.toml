@@ -1,0 +1,17 @@
+# [SECURITY] Streamlit hardening for the Report Decommissioning dashboard.
+
+[client]
+# Do not render stack traces, internal module names, or local paths in the
+# browser. Errors are logged server-side; the UI shows a generic message.
+showErrorDetails = "none"
+
+[server]
+# Bound the raw upload size (MB) as the first line of defense against
+# memory/temp-disk exhaustion. The engine enforces a matching byte cap in
+# report_cleanup.security.validate_upload as a backstop (also for the CLI).
+maxUploadSize = 50
+# Cross-site protections — keep on. CORS off means same-origin only.
+enableXsrfProtection = true
+enableCORS = false
+# Do not collect usage stats from a tool that handles sensitive HR data.
+gatherUsageStats = false

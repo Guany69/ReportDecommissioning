@@ -1,0 +1,20 @@
+# [SECURITY] Pinned with lower *and* upper bounds so a clean clone, the working
+# tree, and any bundled virtualenv resolve to the same dependency set. Bump the
+# upper bound deliberately after testing — do not loosen these to bare `>=`.
+# (Generate hashed pins for production with:  pip-compile --generate-hashes)
+#
+# NOTE: Flask / Flask-CORS are intentionally NOT listed. The app is Streamlit-only
+# and importing Flask-CORS would re-introduce the path-matching advisories that
+# affected releases through 5.0.1 (CVE-2024-6866 and related).
+pandas>=2.2,<3            # engine="calamine" support for fast .xlsx reads
+openpyxl>=3.1,<4          # .xlsx writer + calamine fallback reader
+python-calamine>=0.2,<0.5 # fast Rust-based .xlsx reader (primary ingest engine)
+rapidfuzz>=3.0,<4
+streamlit>=1.37,<2        # 1.37+ for st.user / OIDC auth support
+pyyaml>=6.0,<7
+# xlrd is ONLY used to read legacy binary .xls files (io_readers.read_any).
+# Correction: modern xlrd (>=2.0) is the maintained line and still reads .xls;
+# it dropped the unmaintained .xlsx path (which we never use — calamine/openpyxl
+# handle .xlsx). The old 1.2.0 pin was a 2018 parser kept for no good reason.
+xlrd>=2.0.1,<3
+# sqlite3 is part of the Python standard library — nothing to install.

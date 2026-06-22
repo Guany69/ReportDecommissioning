@@ -13,24 +13,25 @@ ever auto-deleted** — every output is a recommendation.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-# Only if you must read legacy .xls files:
-# pip install "xlrd==1.2.0"
 ```
+
+Legacy binary `.xls` support comes from `xlrd>=2.0.1` (already in
+`requirements.txt`). Modern xlrd is the maintained line and still reads `.xls`;
+it only dropped the old `.xlsx` path, which we never use (calamine/openpyxl read
+`.xlsx`). Re-save `.xls` files as `.xlsx` when you can — it is the faster path.
 
 ## Quick start
 
 ```bash
-# 1. Generate synthetic sample exports (uses the real source headers)
-python sample_data/generate_sample.py
-
-# 2. Run the pipeline (table3 fields are optional but enable duplicate analysis)
+# 1. Run the pipeline against your Workday exports (table3 fields are
+#    optional but enable duplicate analysis)
 python -m report_cleanup.run \
-    --table1 sample_data/metadata.csv \
-    --table2 sample_data/execution.csv \
-    --table3-fields sample_data/fields.csv \
+    --table1 metadata.xlsx \
+    --table2 execution.csv \
+    --table3-fields fields.xlsx \
     --out ./output
 
-# 3. (optional) Review in the dashboard
+# 2. (optional) Review in the dashboard
 streamlit run app.py
 ```
 
@@ -101,6 +102,34 @@ sections, overlapping recommendation thresholds, or invalid caps). Key sections:
 ```bash
 pytest -q
 ```
+
+## Security & deployment notes
+
+This tool handles sensitive HR metadata. Key hardening (see `security.py`):
+
+- **Authentication** is off by default for local/offline use. Set
+  `REPORT_CLEANUP_REQUIRE_AUTH=1` to gate the dashboard. Configure Streamlit
+  OIDC (`[auth]` in `.streamlit/secrets.toml`, e.g. Microsoft Entra ID) for
+  per-user SSO, or set `REPORT_CLEANUP_ACCESS_CODE` for a shared-code fallback.
+- **Sensitive mode** (`--sensitive` / `REPORT_CLEANUP_SENSITIVE_MODE=1`) masks
+  person-identifying columns in the preview, Excel output, **and** the SQLite DB,
+  and pseudonymizes the owner filter. Free-text columns can still embed
+  identifiers, so output dirs are created `0o700`. The DB is not encrypted —
+  store outputs on an encrypted volume for stronger at-rest protection.
+- **Uploads** are validated before parsing: byte-size cap, magic-byte signature
+  check (extension is not trusted), and an `.xlsx` decompression-bomb guard
+  (`security.validate_upload`). The Streamlit server upload cap lives in
+  `.streamlit/config.toml`.
+- **Error details** are suppressed in the UI (`client.showErrorDetails = "none"`).
+
+**Packaging for distribution:** never hand-zip the working directory (it carries
+`.git/`, `.venv/`, caches, `.DS_Store`). Produce a clean archive with:
+
+```bash
+git archive --format=zip -o report-decommissioning.zip HEAD
+```
+
+`.gitattributes` (`export-ignore`) further strips tests/scripts/dev metadata.
 
 ## Module map
 

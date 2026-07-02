@@ -10,8 +10,15 @@ pandas>=2.2,<3            # engine="calamine" support for fast .xlsx reads
 openpyxl>=3.1,<4          # .xlsx writer + calamine fallback reader
 python-calamine>=0.2,<0.5 # fast Rust-based .xlsx reader (primary ingest engine)
 rapidfuzz>=3.0,<4
-streamlit>=1.37,<2        # 1.37+ for st.user / OIDC auth support
+streamlit>=1.37,<2        # legacy_streamlit_app.py only (kept for regression testing)
 pyyaml>=6.0,<7
+# --- Web API service (app.main:app) -----------------------------------------
+fastapi>=0.110,<0.116
+uvicorn[standard]>=0.27,<0.35
+gunicorn>=21.2,<24        # process manager for Azure App Service (see startup.sh)
+pydantic>=2.6,<3
+pydantic-settings>=2.2,<3
+python-multipart>=0.0.9,<0.1  # multipart/form-data uploads for FastAPI
 # xlrd is ONLY used to read legacy binary .xls files (io_readers.read_any).
 # Correction: modern xlrd (>=2.0) is the maintained line and still reads .xls;
 # it dropped the unmaintained .xlsx path (which we never use — calamine/openpyxl

@@ -1,27 +1,50 @@
-"""Runs endpoints — contract checks for the migration scaffold.
-
-The handlers are intentionally not implemented yet (async processing phase), so
-these assert the wiring is in place and that unimplemented handlers signal 501
-rather than 500. Tighten these into behavioral tests as the phase lands.
-"""
 from fastapi.testclient import TestClient
 
 from app.main import app
 
-client = TestClient(app)
+
+VALID_REQUEST = {
+    "submission_id": "RUN-20260702-001",
+    "analysis_as_of_date": "2026-07-02",
+    "source_drive_id": "drive-id",
+    "files": [
+        {
+            "role": "metadata",
+            "item_id": "metadata-item",
+        },
+        {
+            "role": "execution_history",
+            "item_id": "execution-item",
+        },
+        {
+            "role": "report_fields",
+            "item_id": "fields-item",
+        },
+    ],
+}
 
 
-def test_create_run_not_implemented_yet():
-    resp = client.post("/runs", json={"sources": {"table1": "ref-1"}})
-    assert resp.status_code == 501
+def test_run_endpoint_validates_contract():
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/analysis-runs",
+            json=VALID_REQUEST,
+        )
+
+    # Expected until repository and queue are implemented.
+    assert response.status_code == 503
 
 
-def test_get_run_not_implemented_yet():
-    resp = client.get("/runs/abc123")
-    assert resp.status_code == 501
+def test_run_endpoint_rejects_missing_role():
+    payload = {
+        **VALID_REQUEST,
+        "files": VALID_REQUEST["files"][:2],
+    }
 
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/analysis-runs",
+            json=payload,
+        )
 
-def test_create_run_validates_request_body():
-    # Missing required `sources` -> 422 from request validation, not 501.
-    resp = client.post("/runs", json={})
-    assert resp.status_code == 422
+    assert response.status_code == 422

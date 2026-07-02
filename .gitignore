@@ -20,6 +20,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 *.egg-info/
+.coverage
+htmlcov/
 
 # ── Virtual environments ────────────────────────────────────────────────────────
 .venv/
@@ -45,5 +47,5 @@ secrets.yml
 tmp/
 temp/
 
-# Local Claude Code settings (per-machine, not shared)
+# Local editor / tool settings (per-machine, not shared)
 .claude/

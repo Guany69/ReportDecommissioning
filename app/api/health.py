@@ -1,17 +1,51 @@
-"""Liveness / readiness endpoint.
-
-Kept dependency-free so load balancers and Azure App Service health probes can
-hit it cheaply without touching the engine, queue, or storage.
-"""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Request
 
 from app.models.responses import HealthResponse
+from app.settings import get_settings
 
-router = APIRouter(tags=["health"])
+
+router = APIRouter(tags=["Health"])
 
 
-@router.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    return HealthResponse(status="ok")
+@router.get(
+    "/health/live",
+    response_model=HealthResponse,
+)
+async def liveness() -> HealthResponse:
+    settings = get_settings()
+
+    return HealthResponse(
+        status="healthy",
+        service=settings.app_name,
+        version=settings.app_version,
+    )
+
+
+@router.get(
+    "/health/ready",
+    response_model=HealthResponse,
+)
+async def readiness(
+    request: Request,
+) -> HealthResponse:
+    settings = get_settings()
+
+    engine_config = getattr(
+        request.app.state,
+        "engine_config",
+        None,
+    )
+
+    if engine_config is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Engine configuration is not loaded.",
+        )
+
+    return HealthResponse(
+        status="ready",
+        service=settings.app_name,
+        version=settings.app_version,
+    )

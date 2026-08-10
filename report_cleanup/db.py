@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .clean import normalize_report_name, text
+from .clean import normalize_report_name
 from .security import (SENSITIVE_RECORD_KEYS, mask_value, secure_mkdir,
                        sensitive_mode_enabled)
 
@@ -41,6 +41,10 @@ CREATE TABLE IF NOT EXISTS reports (
   potential_duplicate INTEGER, potential_duplicate_of TEXT,
   duplicate_similarity REAL, duplicate_relationship TEXT,
   field_jaccard_similarity REAL, smaller_report_containment REAL,
+  duplicate_scoring_mode TEXT, duplicate_model_status TEXT,
+  duplicate_ml_probability REAL,
+  duplicate_ml_threshold REAL, duplicate_ml_prediction INTEGER,
+  duplicate_model_version TEXT, duplicate_feature_values TEXT,
   total_risk_score INTEGER, recommendation TEXT,
   ownership_flags TEXT, data_quality_flags TEXT, all_flags TEXT,
   dup_group_id TEXT, is_suggested_keeper INTEGER, suggested_keeper_report_name TEXT,
@@ -108,6 +112,20 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     secure_mkdir(Path(db_path).parent)
     conn = sqlite3.connect(str(db_path))
     conn.executescript(SCHEMA)
+    # CREATE TABLE IF NOT EXISTS cannot extend a keep_history=true database.
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(reports)")}
+    for name, sql_type in {
+        "duplicate_scoring_mode": "TEXT",
+        "duplicate_model_status": "TEXT",
+        "duplicate_ml_probability": "REAL",
+        "duplicate_ml_threshold": "REAL",
+        "duplicate_ml_prediction": "INTEGER",
+        "duplicate_model_version": "TEXT",
+        "duplicate_feature_values": "TEXT",
+    }.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE reports ADD COLUMN {name} {sql_type}")
+    conn.commit()
     return conn
 
 
@@ -117,6 +135,9 @@ def _fmt(v):
         return None
     if isinstance(v, (list, set, tuple)):
         return "; ".join(str(x) for x in v)
+    if isinstance(v, dict):
+        import json
+        return json.dumps(v, sort_keys=True, default=str)
     if isinstance(v, pd.Timestamp):
         return None if pd.isna(v) else v.strftime("%Y-%m-%d")
     try:
@@ -162,6 +183,10 @@ REPORT_COLS = [
     "potential_duplicate", "potential_duplicate_of",
     "duplicate_similarity", "duplicate_relationship",
     "field_jaccard_similarity", "smaller_report_containment",
+    # ML duplicate evidence; duplicate_scoring_mode records which path ran.
+    "duplicate_scoring_mode", "duplicate_model_status", "duplicate_ml_probability",
+    "duplicate_ml_threshold", "duplicate_ml_prediction", "duplicate_model_version",
+    "duplicate_feature_values",
     "total_risk_score", "recommendation",
     "ownership_flags", "data_quality_flags", "all_flags",
     "dup_group_id", "is_suggested_keeper", "suggested_keeper_report_name",

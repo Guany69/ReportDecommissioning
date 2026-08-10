@@ -11,6 +11,16 @@ output/
 *.xls
 *.csv
 
+# Local ML weights/checkpoints and reviewer data may contain company metadata.
+*.pt
+*.pth
+*.ckpt
+*.split.json
+models/*
+!models/.gitkeep
+data/training/*
+!data/training/.gitkeep
+
 # ── Python runtime ─────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]

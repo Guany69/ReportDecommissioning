@@ -1,4 +1,4 @@
-"""Weighted duplicate similarity + relationship labels.
+"""Weighted duplicate similarity + relationship labels, with optional ML scoring.
 
 This is duplicate EVIDENCE only — it never feeds the Overall Decommissioning
 Score (see overall.py). For a pair of reports we blend up to nine configurable
@@ -9,17 +9,24 @@ with no field export is not unfairly dragged toward zero on every comparison.
 Set-valued components (fields, business objects, built-in prompts, related
 business objects, authorized usage) use Jaccard. Scalar components (data source,
 report type) use exact normalized equality. Name similarity reuses the project's
-RapidFuzz-based fuzzy matcher (evidence only — never used for the join).
+RapidFuzz-based fuzzy matcher (evidence only — never used for the join). All nine
+are computed by `ml.features`, which is also what the PyTorch model consumes.
+
+When a `DuplicatePredictor` is supplied to `compute_duplicate_matches`, the
+learned probability — not the weighted score — decides whether a candidate pair
+is flagged. The weighted components are still computed and still published as the
+reason trail, and the descriptive relationship label still comes from the
+deterministic containment/Jaccard rules. The model answers "is this a duplicate?";
+the rules answer "what kind of duplicate is it?".
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 from .clean import text
-from rapidfuzz import fuzz
-
-from .dedup import (generate_candidate_pairs, is_strong_name_match,
-                    normalize_name_for_similarity)
+from .dedup import generate_candidate_pairs
+from .ml.features import (FEATURE_NAMES, build_feature_vector, cheap_signals,
+                          full_signals)
 from .soft_scoring import Reason
 
 # Component -> human label for the reason trail.
@@ -35,6 +42,9 @@ _COMPONENT_LABELS = {
     "report_type": "Report Type match",
 }
 
+# Relationship used when the model flags a pair the deterministic rules did not
+# characterize. Reuses an existing label rather than inventing a sixth one.
+_ML_ONLY_RELATIONSHIP = "Possible Duplicate"
 
 @dataclass
 class DuplicateSimilarity:
@@ -46,56 +56,26 @@ class DuplicateSimilarity:
     components: dict[str, float] = field(default_factory=dict)   # available components, 0..100
     weights_used: dict[str, float] = field(default_factory=dict)  # renormalized weights
     reasons: list[Reason] = field(default_factory=list)
+    raw_signals: dict[str, float | None] = field(default_factory=dict)  # all 9, pre-renormalization
 
 
-def _set_jaccard(a: set, b: set) -> float | None:
-    """Jaccard (0..100). Unavailable (None) if either set is empty."""
-    if not a or not b:
-        return None
-    return 100.0 * len(a & b) / len(a | b)
+def compute_duplicate_similarity(a: dict, b: dict, cfg,
+                                 skip_ceiling_short_circuit: bool = False) -> DuplicateSimilarity:
+    """Weighted similarity, relationship label, and reason trail for one pair.
 
-
-def _set_containment(a: set, b: set) -> float | None:
-    """Containment over the smaller set (0..100). Unavailable if either empty."""
-    if not a or not b:
-        return None
-    return 100.0 * len(a & b) / min(len(a), len(b))
-
-
-def _scalar_eq(a, b) -> float | None:
-    """100 if both present and normalized-equal, else 0. Unavailable if either blank."""
-    sa, sb = text(a).casefold(), text(b).casefold()
-    if not sa or not sb:
-        return None
-    return 100.0 if sa == sb else 0.0
-
-
-def _fields(r: dict) -> set:
-    return r.get("report_fields_set") or set()
-
-
-def compute_duplicate_similarity(a: dict, b: dict, cfg) -> DuplicateSimilarity:
+    ``skip_ceiling_short_circuit`` forces every component to be computed. The
+    short-circuit below is an optimization tied to the weighted formula's own
+    'possible' threshold; the ML path needs all nine raw signals regardless of
+    whether the weighted score could ever clear that threshold, so it opts out.
+    """
     w = cfg.duplicate_weights
     th = cfg.duplicate_thresholds
-    name_noise = cfg.clean.get("name_noise", [])
 
-    fa, fb = _fields(a), _fields(b)
-    field_jaccard = _set_jaccard(fa, fb)
-    smaller_containment = _set_containment(fa, fb)
-
-    # Name similarity (de-noised) is computed up front: it both (a) lets a strong
-    # name match flag a duplicate on its own and (b) tightens the short-circuit.
-    # name_sim is the headline SCORE; name_match is the guarded VERDICT (empty and
-    # year/ID-variant names score high but must not flag — see is_strong_name_match).
-    # When either name de-noises to empty the component is UNAVAILABLE (None) — two
-    # empty names score 100 in RapidFuzz, which would otherwise leak a false 100%
-    # into the blend and label nameless reports "Nearly Identical".
-    na = normalize_name_for_similarity(a.get("report_name"), name_noise)
-    nb = normalize_name_for_similarity(b.get("report_name"), name_noise)
-    name_available = bool(na and nb)
-    name_sim = float(fuzz.token_sort_ratio(na, nb)) if name_available else None
-    name_match = is_strong_name_match(
-        a.get("report_name"), b.get("report_name"), name_noise, th.get("name_match", 90))
+    cheap = cheap_signals(a, b, cfg)
+    field_jaccard = cheap.field_jaccard
+    smaller_containment = cheap.smaller_containment
+    name_sim = cheap.name_sim
+    name_match = cheap.name_match
 
     # Ceiling short-circuit (skipped for name matches, which are always flagged below).
     # When both reports have fields, the field components carry most of the weight;
@@ -104,9 +84,9 @@ def compute_duplicate_similarity(a: dict, b: dict, cfg) -> DuplicateSimilarity:
     # the 'possible' threshold it can never be flagged, so skip the remaining
     # BO/prompt/related/auth comparisons. Correctness-preserving. An unavailable name
     # folds into other_w (counted at its 100 max) so the ceiling stays an upper bound.
-    if not name_match and field_jaccard is not None:
+    if not skip_ceiling_short_circuit and not name_match and field_jaccard is not None:
         total = sum(w.values()) or 1.0
-        name_w = w.get("name", 0) if name_available else 0
+        name_w = w.get("name", 0) if cheap.name_available else 0
         other_w = total - w.get("field_jaccard", 0) - w.get("smaller_containment", 0) - name_w
         ceiling = (w.get("field_jaccard", 0) * field_jaccard
                    + w.get("smaller_containment", 0) * smaller_containment
@@ -117,24 +97,11 @@ def compute_duplicate_similarity(a: dict, b: dict, cfg) -> DuplicateSimilarity:
                 field_jaccard=round(field_jaccard, 1),
                 smaller_containment=round(smaller_containment, 1),
                 components={}, weights_used={}, reasons=[],
+                raw_signals={},
             )
 
     # value per component (None = unavailable -> renormalized away).
-    values: dict[str, float | None] = {
-        "field_jaccard": field_jaccard,
-        "smaller_containment": smaller_containment,
-        "business_object": _set_jaccard(a.get("business_objects_set") or set(),
-                                        b.get("business_objects_set") or set()),
-        "name": name_sim,
-        "built_in_prompts": _set_jaccard(a.get("built_in_prompts_set") or set(),
-                                         b.get("built_in_prompts_set") or set()),
-        "related_business_object": _set_jaccard(a.get("related_bos_set") or set(),
-                                                b.get("related_bos_set") or set()),
-        "data_source": _scalar_eq(a.get("data_source"), b.get("data_source")),
-        "authorized_usage": _set_jaccard(a.get("authorized_usage_set") or set(),
-                                         b.get("authorized_usage_set") or set()),
-        "report_type": _scalar_eq(a.get("report_type"), b.get("report_type")),
-    }
+    values = full_signals(a, b, cheap)
 
     available = {k: v for k, v in values.items() if v is not None and k in w}
     weight_sum = sum(w[k] for k in available) or 1.0
@@ -169,17 +136,13 @@ def compute_duplicate_similarity(a: dict, b: dict, cfg) -> DuplicateSimilarity:
         components={k: round(v, 1) for k, v in available.items()},
         weights_used={k: round(v, 4) for k, v in weights_used.items()},
         reasons=reasons,
+        raw_signals=values,
     )
 
 
-def compute_duplicate_matches(records: list[dict], cfg) -> None:
-    """Stamp weighted duplicate evidence onto every record.
-
-    For each candidate pair (inverted-index generated) the weighted similarity is
-    computed; pairs at/above the 'possible' threshold are retained as matches on
-    BOTH reports. The highest-scoring match becomes each report's headline
-    duplicate. This is evidence only — it never changes the Overall Score.
-    """
+def _reset_duplicate_fields(records: list[dict], scoring_mode: str,
+                            model_version: str | None, threshold: float | None,
+                            model_status: str) -> None:
     for r in records:
         r["potential_duplicate"] = False
         r["potential_duplicate_of"] = None
@@ -189,39 +152,146 @@ def compute_duplicate_matches(records: list[dict], cfg) -> None:
         r["smaller_report_containment"] = None
         r["duplicate_matches"] = []          # all qualified matches (highest first)
         r["duplicate_reason_trail"] = []
+        # ML evidence. duplicate_scoring_mode is stamped even when ML is off so the
+        # export/DB always states which path produced the verdict.
+        r["duplicate_scoring_mode"] = scoring_mode
+        r["duplicate_model_status"] = model_status
+        r["duplicate_model_version"] = model_version
+        r["duplicate_ml_probability"] = None
+        r["duplicate_ml_threshold"] = threshold
+        r["duplicate_ml_prediction"] = None
+        r["duplicate_feature_values"] = None
 
-    by_uid = {r["report_uid"]: r for r in records}
+
+def compute_duplicate_matches(records: list[dict], cfg, predictor=None, *,
+                              scoring_status: str | None = None) -> dict[str, object]:
+    """Stamp weighted (and optionally ML) duplicate evidence onto every record.
+
+    For each candidate pair from the deterministic inverted-index blocking, the
+    weighted similarity is computed. Pairs that qualify are retained as matches on
+    BOTH reports and the highest-scoring match becomes each report's headline
+    duplicate. This is evidence only — it never changes the Overall Score.
+
+    Qualification depends on the scoring mode:
+
+    * baseline (``predictor is None``) — the weighted score clears
+      ``duplicate_thresholds.possible``, or the guarded name-match rule fires.
+    * ML (``predictor`` supplied) — the model's probability for the pair is at or
+      above the decision threshold. Candidate blocking is unchanged, so the model
+      never sees an all-pairs comparison; it re-ranks the same candidate set the
+      deterministic stage already produced.
+    """
+    use_ml = predictor is not None
+    threshold = float(predictor.threshold) if use_ml else None
+    _reset_duplicate_fields(
+        records,
+        scoring_mode="ml" if use_ml else "weighted_baseline",
+        model_version=predictor.model_version if use_ml else None,
+        threshold=threshold,
+        model_status=scoring_status or ("pytorch" if use_ml else "disabled"),
+    )
+
     max_matches = cfg.duplicate_thresholds.get("max_matches_per_report", 50)
 
-    for i, j in generate_candidate_pairs(records, cfg):
+    pairs = sorted(generate_candidate_pairs(records, cfg))
+    sims = [
+        compute_duplicate_similarity(records[i], records[j], cfg,
+                                     skip_ceiling_short_circuit=use_ml)
+        for i, j in pairs
+    ]
+
+    if use_ml:
+        # One batched pass over every candidate pair — not one forward call per pair.
+        vectors = [build_feature_vector(s.raw_signals) for s in sims]
+        probabilities = predictor.predict(vectors)
+    else:
+        probabilities = [None] * len(pairs)
+
+    # Highest probability the model assigned to ANY candidate pair involving each
+    # report — recorded even when it never clears the threshold, so "scored and
+    # rejected at 12%" is distinguishable from "never a candidate" (None).
+    best_prob: dict[int, tuple[float, dict[str, float | None]]] = {}
+
+    for (i, j), sim, prob in zip(pairs, sims, probabilities):
         a, b = records[i], records[j]
-        sim = compute_duplicate_similarity(a, b, cfg)
-        if not sim.potential_duplicate:
+        model_features = dict(zip(
+            FEATURE_NAMES, build_feature_vector(sim.raw_signals), strict=True))
+        if use_ml:
+            for rec in (a, b):
+                uid = rec["report_uid"]
+                if uid not in best_prob or prob > best_prob[uid][0]:
+                    best_prob[uid] = (prob, model_features)
+        if use_ml:
+            qualified = predictor.is_duplicate(prob)
+            relationship = sim.relationship if sim.relationship != "Not Flagged" else _ML_ONLY_RELATIONSHIP
+        else:
+            qualified = sim.potential_duplicate
+            relationship = sim.relationship
+        if not qualified:
             continue
         for src, other in ((a, b), (b, a)):
             src["duplicate_matches"].append({
                 "other_uid": other["report_uid"],
                 "other_report_name": text(other.get("report_name")),
                 "similarity": sim.overall,
-                "relationship": sim.relationship,
+                "relationship": relationship,
                 "field_jaccard_similarity": sim.field_jaccard,
                 "smaller_report_containment": sim.smaller_containment,
+                "ml_probability": None if prob is None else float(prob),
+                "feature_values": model_features,
+                "_reason_trail": list(sim.reasons),
             })
 
     for r in records:
-        matches = sorted(r["duplicate_matches"], key=lambda m: m["similarity"], reverse=True)
+        matches = sorted(r["duplicate_matches"],
+                         key=lambda m: (m.get("ml_probability") if use_ml else m["similarity"]) or 0.0,
+                         reverse=True)
+        best_reason_trail = list(matches[0]["_reason_trail"]) if matches else []
+        for match in matches:
+            match.pop("_reason_trail", None)
         r["duplicate_matches"] = matches[:max_matches]   # bound memory on huge clusters
-        if matches:
-            best = matches[0]
-            r["potential_duplicate"] = True
-            r["potential_duplicate_of"] = best["other_report_name"]
-            r["duplicate_similarity"] = best["similarity"]
-            r["duplicate_relationship"] = best["relationship"]
-            r["field_jaccard_similarity"] = best["field_jaccard_similarity"]
-            r["smaller_report_containment"] = best["smaller_report_containment"]
-            other = by_uid.get(best["other_uid"])   # O(1) lookup, not O(n)
-            sim = compute_duplicate_similarity(r, other, cfg) if other else None
-            r["duplicate_reason_trail"] = sim.reasons if sim else []
+        if not matches:
+            continue
+        best = matches[0]
+        r["potential_duplicate"] = True
+        r["potential_duplicate_of"] = best["other_report_name"]
+        r["duplicate_similarity"] = best["similarity"]
+        r["duplicate_relationship"] = best["relationship"]
+        r["field_jaccard_similarity"] = best["field_jaccard_similarity"]
+        r["smaller_report_containment"] = best["smaller_report_containment"]
+        trail = best_reason_trail
+        if use_ml and best["ml_probability"] is not None:
+            # The model probability leads; the weighted components stay underneath as
+            # supporting evidence. They are context for a reviewer, NOT a causal
+            # explanation of what the network did.
+            trail.insert(0, Reason(
+                "duplicate",
+                f"PyTorch duplicate model probability {best['ml_probability'] * 100:.1f}% "
+                f"(decision threshold {threshold * 100:.1f}%).",
+                None))
+        r["duplicate_reason_trail"] = trail
+        r["duplicate_feature_values"] = best["feature_values"]
+
+    if use_ml:
+        for r in records:
+            best_candidate = best_prob.get(r["report_uid"])
+            if best_candidate is None:
+                continue        # never generated as a candidate — nothing was scored
+            prob, raw = best_candidate
+            r["duplicate_ml_probability"] = float(prob)
+            r["duplicate_ml_prediction"] = predictor.is_duplicate(prob)
+            r["duplicate_feature_values"] = dict(raw)
+
+    return {
+        "candidate_pair_count": len(pairs),
+        "pairs_scored_by_ml": len(pairs) if use_ml else 0,
+        "qualified_pair_count": sum(len(r["duplicate_matches"]) for r in records) // 2,
+        "duplicate_scoring_mode": "ml" if use_ml else "weighted_baseline",
+        "model_status": scoring_status or ("pytorch" if use_ml else "disabled"),
+        "model_version": predictor.model_version if use_ml else None,
+        "decision_threshold": threshold,
+        **(predictor.stats.as_dict() if use_ml else {}),
+    }
 
 
 def _classify(overall: float, containment: float | None, th: dict) -> tuple[str, bool]:

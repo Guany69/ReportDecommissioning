@@ -255,3 +255,24 @@ duplicate_thresholds:
   # tokens, so "Copy of X" / "(Old) X" / exact repeats all score ~100 here. Jaccard
   # still characterizes the relationship and picks the keeper.
   name_match: 90
+
+# ---- PyTorch duplicate classifier (optional, off by default) --------------
+# A learned re-ranking layer over the SAME deterministic candidate pairs. It
+# answers one question — "is this pair a duplicate?" — and replaces only the
+# threshold decision that duplicate_thresholds.possible makes today. It does NOT
+# touch hard rules, cleanup risk, business-protection credits, or the Overall
+# Decommissioning Score; duplicate evidence remains evidence.
+#
+# Behaviour when the artifact is absent (a clean clone has no trained model):
+#   enabled: false                                  -> weighted baseline
+#   enabled + valid model                           -> PyTorch probability
+#   enabled + missing/invalid + fallback: true      -> loud warning, weighted baseline
+#   enabled + missing/invalid + fallback: false     -> the run fails
+# Every report carries `duplicate_scoring_mode` ("ml" / "weighted_baseline") so
+# the output itself proves which path ran.
+ml_duplicate:
+  enabled: false
+  model_path: "models/duplicate_model.pt"           # relative paths resolve beside this config file
+  decision_threshold: null                          # null = use the threshold chosen during training
+  fallback_to_weighted_similarity: true
+  batch_size: 512                                   # candidate pairs per forward pass

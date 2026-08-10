@@ -16,6 +16,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from .clean import normalize_report_name, text
+from .ml.features import RAW_SIGNAL_NAMES
 from .security import (
     mask_df,
     sanitize_df_for_excel,
@@ -57,6 +58,37 @@ def _int(v):
 
 def _pct(v):
     return "" if v is None or (not isinstance(v, (int, float))) or pd.isna(v) else v
+
+
+def _prob_pct(v):
+    """0..1 probability -> a 0..100 percentage cell (blank when unavailable).
+
+    Records carry ML probabilities on the predictor's native 0..1 scale; the
+    workbook renders percentages so the ML columns read the same way as the
+    existing Field Jaccard % / Duplicate Similarity columns.
+    """
+    if v is None or not isinstance(v, (int, float)) or isinstance(v, bool) or pd.isna(v):
+        return ""
+    return round(float(v) * 100.0, 1)
+
+
+def _feature_evidence(model_features) -> str:
+    """Render normalized model values and missingness as reviewer evidence.
+
+    Unavailable signals are shown as 'n/a' rather than omitted or zeroed — the
+    distinction between "no overlap" and "no data" is the whole reason the model
+    gets missingness indicators, and a reviewer needs to see it too.
+    """
+    if not isinstance(model_features, dict) or not model_features:
+        return ""
+    parts = []
+    for name in RAW_SIGNAL_NAMES:
+        if name not in model_features:
+            continue
+        missing = float(model_features.get(f"{name}_missing", 0.0)) >= 0.5
+        value = float(model_features[name])
+        parts.append(f"{name}={'n/a' if missing else f'{value * 100:.0f}%'}")
+    return "; ".join(parts)
 
 
 def _flags(v):
@@ -123,6 +155,21 @@ def report_row(r: dict) -> dict:
         "Duplicate Relationship": text(r.get("duplicate_relationship")),
         "Field Jaccard %": _pct(r.get("field_jaccard_similarity")),
         "Smaller Report Containment %": _pct(r.get("smaller_report_containment")),
+        # ---- ML duplicate evidence (blank unless the PyTorch model ran) ----
+        # "Duplicate Scoring Mode" / "Duplicate Model Status" are the audit columns:
+        # together they say which path produced the verdict above and why, so a
+        # reader never has to assume ML inference happened.
+        "Duplicate Scoring Mode": text(r.get("duplicate_scoring_mode")),
+        "Duplicate Model Status": text(r.get("duplicate_model_status")),
+        # Records hold probabilities on 0..1 (the predictor's native scale); the
+        # workbook shows them as percentages like every other similarity column.
+        "ML Duplicate Probability %": _prob_pct(r.get("duplicate_ml_probability")),
+        "ML Decision Threshold %": _prob_pct(r.get("duplicate_ml_threshold")),
+        "ML Duplicate Prediction": _bool(r.get("duplicate_ml_prediction")),
+        "Duplicate Model Version": text(r.get("duplicate_model_version")),
+        # Supporting evidence for the probability — NOT a causal explanation of the
+        # network's output. Reviewers read these alongside it, not as its reasoning.
+        "ML Feature Evidence": _feature_evidence(r.get("duplicate_feature_values")),
         # ---- Legacy risk columns (cleanup sub-scores; kept for continuity) ----
         "usage_risk": "" if hard else r.get("usage_risk", ""),
         "age_risk": "" if hard else r.get("age_risk", ""),

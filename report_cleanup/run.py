@@ -57,6 +57,15 @@ def main(argv=None) -> int:
     if fd.get("metadata_only_pairs", 0):
         print(f"  Metadata-similar (no field evidence): {fd['metadata_only_pairs']} pairs")
 
+    duplicate_scoring = res.get("duplicate_scoring", {})
+    mode = duplicate_scoring.get("duplicate_scoring_mode", "weighted_baseline")
+    status = duplicate_scoring.get("model_status", "disabled")
+    version = duplicate_scoring.get("model_version")
+    model_detail = f", model {version}" if version else ""
+    print(f"  Duplicate scoring : {mode} ({status}{model_detail})")
+    print(f"  Candidate pairs   : {duplicate_scoring.get('candidate_pair_count', 0)} "
+          f"({duplicate_scoring.get('pairs_scored_by_ml', 0)} scored by ML)")
+
     for w in res["warnings"]:
         print(f"  WARN: {w}")
     print(f"  Excel  : {res['xlsx']}")

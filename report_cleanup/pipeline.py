@@ -5,10 +5,38 @@ import os
 import sys
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
+
+from . import db, schema
+from .clean import clean_table
+from .config import Config, load_config
+from .dedup import CLASSIFICATION_META_ONLY, detect_duplicates
+from .duplicate_similarity import compute_duplicate_matches
+from .exec_rollup import build_exec_rollup
+from .export_excel import export_decommission_summary, export_workbook
+from .field_rollup import (
+    FIELD_EXPORT_MODE_MISSING,
+    attach_report_fields,
+    build_report_field_rollup,
+    validate_field_table,
+)
+from .flags import build_all_flags
+from .hard_rules import apply_hard_rules, has_recent_or_recurring_usage
+from .io_readers import file_sha256, read_any
+from .join import derive_effective_last_run, join_reports
+from .ml import build_predictor
+from .overall import calculate_overall_score
+from .protection import calculate_protection_credit
+from .recommend import (apply_duplicate_analysis, recommend_label,
+                        resolve_recommendation)
+from .recurrence import detect_recurrence
+from .soft_scoring import Reason, score_report
+from .validate import validate
 
 _PROFILE = os.environ.get("REPORT_CLEANUP_PROFILE", "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -46,54 +74,43 @@ def _make_stage(progress=None):
 
     return stage
 
-from . import db, schema
-from .clean import clean_table
-from .config import Config, load_config
-from .dedup import CLASSIFICATION_META_ONLY, detect_duplicates
-from .exec_rollup import build_exec_rollup
-from .export_excel import export_decommission_summary, export_workbook
-from .field_rollup import (
-    FIELD_EXPORT_MODE_MISSING,
-    attach_report_fields,
-    build_report_field_rollup,
-    validate_field_table,
-)
-from .flags import build_all_flags
-from .hard_rules import apply_hard_rules, has_recent_or_recurring_usage
-from .io_readers import file_sha256, read_any
-from .join import derive_effective_last_run, join_reports
-from .overall import calculate_overall_score
-from .protection import calculate_protection_credit
-from .recurrence import detect_recurrence
-from .duplicate_similarity import compute_duplicate_matches
-from .recommend import (apply_duplicate_analysis, recommend_label,
-                        resolve_recommendation)
-from .soft_scoring import Reason, score_report
-from .validate import validate
+@dataclass
+class PreparedInputs:
+    """Everything the deterministic ingest half of the pipeline produces.
+
+    Split out of `run_pipeline` so `training.generate_pairs` can reach the same
+    field-attached records without duplicating (and drifting from) the ingest,
+    validation, cleaning, rollup, join, recurrence, and field-attachment steps.
+    `run_pipeline`'s behaviour and stage ordering are unchanged.
+    """
+
+    records: list[dict]
+    by_uid: dict[int, dict]
+    field_rollup_result: dict
+    field_mode: str
+    warnings: list[str] = field(default_factory=list)
+    diag: dict[str, Any] = field(default_factory=dict)
+    field_coverage: Any = None
+    raw_row_counts: dict[str, int] = field(default_factory=dict)
 
 
-def _rename_to_canonical(df: pd.DataFrame, mapping: dict[str, str]) -> pd.DataFrame:
-    """Keep only mapped columns, renamed source_header -> canonical_key."""
-    inv = {src: key for key, src in mapping.items()}
-    cols = [c for c in df.columns if c in inv]
-    return df[cols].rename(columns=inv)
-
-
-def run_pipeline(
+def prepare_records(
     table1_path,
     table2_path=None,
     table3_fields_path=None,
-    config_path=None,
-    out_dir=None,
-    config: Config | None = None,
-    progress=None,
-) -> dict:
-    cfg = config or load_config(config_path)
-    out_dir = Path(out_dir) if out_dir else Path(cfg.get("run.excel_dir", "output"))
-    started = datetime.now()
-    # Per-stage progress: prints timing under REPORT_CLEANUP_PROFILE and drives an
-    # optional UI callback `progress(fraction, label)`.
-    stage = _make_stage(progress)
+    cfg=None,
+    stage=None,
+) -> PreparedInputs:
+    """Steps 1-8: ingest -> map -> validate -> clean -> field rollup -> exec rollup
+    + join -> recurrence -> attach field sets.
+
+    Raises ValueError when table1/table2 validation is fatal. Field-export problems
+    are never fatal; they downgrade `field_mode` and add warnings.
+    """
+    if cfg is None:
+        raise ValueError("prepare_records requires a loaded Config.")
+    if stage is None:
+        stage = _make_stage(None)
 
     # 1. INGEST
     with stage("ingest files"):
@@ -153,6 +170,50 @@ def run_pipeline(
     with stage("attach field sets"):
         attach_report_fields(records, field_rollup_result, field_mode, cfg)
 
+    return PreparedInputs(
+        records=records,
+        by_uid=by_uid,
+        field_rollup_result=field_rollup_result,
+        field_mode=field_mode,
+        warnings=all_warnings,
+        diag=diag,
+        field_coverage=vr.field_coverage,
+        raw_row_counts={"table1": len(t1_raw), "table2": len(t2_raw), "table3": len(t3_raw)},
+    )
+
+
+def _rename_to_canonical(df: pd.DataFrame, mapping: dict[str, str]) -> pd.DataFrame:
+    """Keep only mapped columns, renamed source_header -> canonical_key."""
+    inv = {src: key for key, src in mapping.items()}
+    cols = [c for c in df.columns if c in inv]
+    return df[cols].rename(columns=inv)
+
+
+def run_pipeline(
+    table1_path,
+    table2_path=None,
+    table3_fields_path=None,
+    config_path=None,
+    out_dir=None,
+    config: Config | None = None,
+    progress=None,
+) -> dict:
+    cfg = config or load_config(config_path)
+    out_dir = Path(out_dir) if out_dir else Path(cfg.get("run.excel_dir", "output"))
+    started = datetime.now()
+    # Per-stage progress: prints timing under REPORT_CLEANUP_PROFILE and drives an
+    # optional UI callback `progress(fraction, label)`.
+    stage = _make_stage(progress)
+
+    # 1-8. INGEST -> VALIDATE -> CLEAN -> ROLLUPS -> JOIN -> RECURRENCE -> FIELD SETS
+    prepared = prepare_records(table1_path, table2_path, table3_fields_path, cfg, stage)
+    records = prepared.records
+    by_uid = prepared.by_uid
+    field_rollup_result = prepared.field_rollup_result
+    field_mode = prepared.field_mode
+    all_warnings = prepared.warnings
+    diag = prepared.diag
+
     # 9-10. SCORING: hard rules -> cleanup risk -> protection credit -> Overall Score.
     # Duplicate evidence is NOT an input here (it only affects wording later).
     for r in records:
@@ -211,9 +272,23 @@ def run_pipeline(
         groups, meta_only_pairs = detect_duplicates(records, cfg)
         apply_duplicate_analysis(by_uid, groups, cfg)
 
-    # 12b. WEIGHTED DUPLICATE SIMILARITY (evidence only — never changes the score).
-    with stage("weighted duplicate similarity"):
-        compute_duplicate_matches(records, cfg)
+    # 12b. DUPLICATE SIMILARITY (evidence only — never changes the Overall Score).
+    # The PyTorch classifier, when enabled AND a valid artifact loads, decides which
+    # candidate pairs are flagged; otherwise the deterministic weighted baseline
+    # does. build_predictor is called exactly once per run — the model is never
+    # re-read from disk per pair — and any downgrade to the baseline is surfaced as
+    # a run warning rather than silently swallowed.
+    predictor = build_predictor(cfg, warn=all_warnings.append)
+    ml_enabled = bool(cfg.ml_duplicate.get("enabled", False))
+    scoring_status = (
+        "pytorch" if predictor is not None
+        else "fallback_weighted" if ml_enabled
+        else "disabled"
+    )
+    label = "ML duplicate scoring" if predictor is not None else "weighted duplicate similarity"
+    with stage(label):
+        ml_diag = compute_duplicate_matches(
+            records, cfg, predictor=predictor, scoring_status=scoring_status)
     group_of = {}
     for g in groups:
         for u in g.members:
@@ -235,6 +310,7 @@ def run_pipeline(
         g = group_of.get(r["report_uid"])
         r["suggested_action"] = resolve_recommendation(r, g, by_uid, cfg)
         r["all_reasons"].extend(r.get("dup_reasons", []))
+        r["all_reasons"].extend(r.get("duplicate_reason_trail", []))
 
     finished = datetime.now()
 
@@ -261,6 +337,9 @@ def run_pipeline(
         "metadata_only_pairs": len(meta_only_pairs),
     }
 
+    # 15b. DUPLICATE-SCORING DIAGNOSTICS — records which path actually ran.
+    field_diag["duplicate_scoring"] = ml_diag
+
     # 16. PERSIST
     run_meta = {
         "started_at": started.isoformat(timespec="seconds"),
@@ -270,17 +349,17 @@ def run_pipeline(
         # randomized temp-upload names into the SQLite DB and Excel snapshot.
         "table1_file": Path(table1_path).name,
         "table1_sha": file_sha256(table1_path),
-        "table1_rows": len(t1_raw),
+        "table1_rows": prepared.raw_row_counts["table1"],
         "table2_file": Path(table2_path).name if table2_path else None,
         "table2_sha": file_sha256(table2_path) if table2_path else None,
-        "table2_rows": len(t2_raw),
+        "table2_rows": prepared.raw_row_counts["table2"],
         "table3_file": Path(table3_fields_path).name if table3_fields_path else None,
         "table3_sha": file_sha256(table3_fields_path) if table3_fields_path else None,
-        "table3_rows": len(t3_raw),
+        "table3_rows": prepared.raw_row_counts["table3"],
         "config_snapshot": cfg.snapshot_json(),
         "diag": diag,
         "field_diag": field_diag,
-        "field_coverage": vr.field_coverage,
+        "field_coverage": prepared.field_coverage,
         "warnings": all_warnings,
     }
 
@@ -306,6 +385,7 @@ def run_pipeline(
         "groups": groups,
         "diag": diag,
         "field_diag": field_diag,
+        "duplicate_scoring": ml_diag,
         "warnings": all_warnings,
         "xlsx": xlsx,
         "summary_xlsx": summary_xlsx,
